@@ -8,7 +8,7 @@ OPTIONS = {
     "packages": [
         "anthropic", "openai", "pyautogui", "pynput",
         "faster_whisper", "sounddevice", "numpy", "PIL",
-        "rumps", "AppKit", "Quartz", "yaml", "matplotlib",
+        "rumps", "pyobjc", "AppKit", "Quartz", "yaml", "matplotlib",
         "openwakeword",
     ],
     "plist": {
