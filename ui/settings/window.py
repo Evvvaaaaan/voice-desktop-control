@@ -23,6 +23,7 @@ class SettingsWindow:
         self._routines_path = routines_path
         self._db_path = db_path
         self._window = None
+        self._nav_ctrl = None
         self._current_page = "General"
 
     def _save(self):
@@ -59,10 +60,15 @@ class SettingsWindow:
         )
         seg.setFrame_(AppKit.NSMakeRect(0, 470, 700, 30))
         self._window.contentView().addSubview_(seg)
+        self._nav_ctrl = seg
         self._load_page("General")
 
     def _load_page(self, page_name: str) -> None:
         self._current_page = page_name
+        content = self._window.contentView()
+        for v in list(content.subviews()):
+            if v != self._nav_ctrl:
+                v.removeFromSuperview()
         page_map = {
             "General": self._build_general,
             "STT": self._build_stt,
