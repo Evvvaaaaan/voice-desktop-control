@@ -48,3 +48,26 @@ def test_press_key_calls_pyautogui(mocker):
     from actions.mouse_keyboard import press_key
     press_key("enter")
     mock_pg.press.assert_called_once_with("enter")
+
+
+def test_scroll_calls_pyautogui(mocker):
+    mock_pg = mocker.patch("actions.mouse_keyboard.pyautogui")
+    from actions.mouse_keyboard import scroll
+    scroll(100, 200, "down", 3)
+    mock_pg.scroll.assert_called_once_with(-3, x=100, y=200)
+
+
+def test_click_element_by_name_success(mocker):
+    mock_run = mocker.patch("subprocess.run")
+    mock_run.return_value = MagicMock(returncode=0)
+    from actions.accessibility import click_element_by_name
+    result = click_element_by_name("Safari", "OK")
+    assert result is True
+
+
+def test_click_element_by_name_failure(mocker):
+    mock_run = mocker.patch("subprocess.run")
+    mock_run.return_value = MagicMock(returncode=1)
+    from actions.accessibility import click_element_by_name
+    result = click_element_by_name("Safari", "MissingButton")
+    assert result is False
