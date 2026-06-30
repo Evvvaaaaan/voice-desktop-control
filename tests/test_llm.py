@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import MagicMock, patch
-from config.loader import Config, LLMConfig
+from config.loader import Config
 from llm import get_llm_adapter
 from llm.base import LLMBase
 
