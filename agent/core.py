@@ -1,3 +1,4 @@
+import base64
 import json
 import time
 from llm.base import LLMBase
@@ -9,6 +10,7 @@ from agent.context import ConversationContext
 from agent import tools
 from actions.tts import speak
 from actions.applescript import run_applescript
+from actions.screen import take_screenshot
 
 MAX_ITERATIONS = 5
 
@@ -54,8 +56,12 @@ class Agent:
         final_response = ""
         action = "none"
         params: dict = {}
+        pending_vision: dict | None = None
         for i in range(MAX_ITERATIONS):
             messages = self._context.to_messages(command if i == 0 else None)
+            if pending_vision:
+                messages.append(pending_vision)
+                pending_vision = None
             raw = self._llm.complete(messages)
 
             try:
@@ -84,6 +90,20 @@ class Agent:
             if done:
                 final_response = response_text
                 break
+
+            # Vision-verify: feed screenshot back so LLM can confirm success
+            if action != "speak_only" and i < MAX_ITERATIONS - 1:
+                try:
+                    img_b64 = base64.b64encode(take_screenshot()).decode()
+                    pending_vision = {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_b64}},
+                            {"type": "text", "text": "화면 상태입니다. 작업이 완료됐는지 확인하고 계속하세요."},
+                        ],
+                    }
+                except Exception:
+                    pass
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
         success = bool(final_response and final_response != "취소됨")
