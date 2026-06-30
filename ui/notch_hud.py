@@ -1,5 +1,4 @@
 # ui/notch_hud.py
-import threading
 from ui.animations import STATE_COLORS, STATE_LABELS
 
 
