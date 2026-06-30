@@ -1,5 +1,13 @@
 import threading
 
+# Maps user-facing phrase to the closest available openwakeword model name.
+# openwakeword ships pre-trained models — arbitrary phrase strings are not valid
+# model names.  "hey_jarvis" is the closest freely available model.
+_PHRASE_TO_MODEL = {
+    "hey desk": "hey_jarvis",
+    "hey jarvis": "hey_jarvis",
+}
+
 
 class WakeWordListener:
     """Listens for wake word detection and invokes a callback."""
@@ -33,7 +41,8 @@ class WakeWordListener:
             from openwakeword.model import Model
             import sounddevice as sd
 
-            model = Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
+            model_name = _PHRASE_TO_MODEL.get(self._phrase, "hey_jarvis")
+            model = Model(wakeword_models=[model_name], inference_framework="onnx")
             sample_rate = 16000
             chunk = 1280
 

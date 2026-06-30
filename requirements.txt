@@ -1,5 +1,6 @@
 anthropic>=0.40.0
 openai>=1.50.0
+SpeechRecognition>=3.10.0
 pyautogui>=0.9.54
 pynput>=1.7.6
 openwakeword>=0.6.0

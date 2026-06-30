@@ -44,7 +44,11 @@ class Agent:
             except (json.JSONDecodeError, ValueError):
                 params_dict = {}
             if action_str == "launch_app":
+                import re
+                _SAFE = re.compile(r'^[A-Za-z0-9 ._-]+$')
                 app = params_dict.get("app", params_str)
+                if not _SAFE.match(str(app)):
+                    return f"error: invalid app name: {app}"
                 result = run_applescript(f'tell application "{app}" to activate')
             else:
                 result = tools.dispatch(action_str, params_dict)

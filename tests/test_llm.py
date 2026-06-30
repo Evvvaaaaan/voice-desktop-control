@@ -29,6 +29,31 @@ def test_claude_adapter(mocker):
     adapter = ClaudeAdapter(api_key="sk-ant-test", model="claude-sonnet-4-6")
     result = adapter.complete([{"role": "user", "content": "사파리 열어줘"}])
     assert result == "사파리 열었습니다"
+    # system message must NOT appear inside the messages array
+    call_kwargs = mock_client.messages.create.call_args[1]
+    for msg in call_kwargs.get("messages", []):
+        assert msg.get("role") != "system", "system role must not appear in messages array"
+
+
+def test_claude_adapter_system_prompt_extracted(mocker):
+    from llm.claude_adapter import ClaudeAdapter
+    mock_anthropic = mocker.patch("llm.claude_adapter.anthropic.Anthropic")
+    mock_client = mock_anthropic.return_value
+    mock_msg = MagicMock()
+    mock_msg.content = [MagicMock(type="text", text="ok")]
+    mock_client.messages.create.return_value = mock_msg
+    adapter = ClaudeAdapter(api_key="sk-ant-test", model="claude-sonnet-4-6")
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "안녕"},
+    ]
+    adapter.complete(messages)
+    call_kwargs = mock_client.messages.create.call_args[1]
+    # system prompt is passed as top-level param
+    assert call_kwargs.get("system") == "You are a helpful assistant."
+    # messages array contains only the user turn
+    assert len(call_kwargs["messages"]) == 1
+    assert call_kwargs["messages"][0]["role"] == "user"
 
 
 def test_openai_adapter(mocker):

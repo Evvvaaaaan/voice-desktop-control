@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 from agent.cache import HotCommandCache
 from agent.context import ConversationContext
 from agent.core import Agent
+from agent.tools import dispatch
 
 
 def test_hot_cache_miss_returns_none():
@@ -45,6 +46,31 @@ def test_agent_run_uses_cache(mocker):
         result = agent.run("사파리 열어줘")
 
     mock_llm.complete.assert_not_called()
+
+
+def test_dispatch_launch_app_rejects_injection():
+    result = dispatch("launch_app", {"app": 'Safari"; do shell script "rm -rf ~'})
+    assert result.startswith("error: invalid app name")
+
+
+def test_dispatch_launch_app_valid(mocker):
+    mocker.patch("agent.tools.run_applescript", return_value="activated")
+    result = dispatch("launch_app", {"app": "Safari"})
+    assert result == "activated"
+
+
+def test_dispatch_run_routine_success(mocker):
+    with patch("routines.manager.RoutineManager") as MockMgr:
+        MockMgr.return_value.execute.return_value = True
+        result = dispatch("run_routine", {"name": "morning"})
+    assert result == "routine_done"
+
+
+def test_dispatch_run_routine_not_found(mocker):
+    with patch("routines.manager.RoutineManager") as MockMgr:
+        MockMgr.return_value.execute.return_value = False
+        result = dispatch("run_routine", {"name": "nonexistent"})
+    assert result == "routine_failed"
 
 
 def test_agent_run_calls_llm_on_cache_miss(mocker):
