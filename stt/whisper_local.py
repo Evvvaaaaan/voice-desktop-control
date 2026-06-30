@@ -1,6 +1,5 @@
 import tempfile
 import os
-import numpy as np
 from faster_whisper import WhisperModel
 from stt.base import STTBase
 
