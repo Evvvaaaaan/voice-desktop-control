@@ -43,6 +43,10 @@ def _make_appkit_mock():
     appkit.NSPopUpButton = MagicMock()
     appkit.NSPopUpButton.alloc.return_value.initWithFrame_pullsDown_.return_value = MagicMock()
 
+    appkit.NSSegmentSwitchTrackingSelectOne = 0
+    appkit.NSSegmentedControl = MagicMock()
+    appkit.NSSegmentedControl.segmentedControlWithLabels_trackingMode_target_action_.return_value = MagicMock()
+
     fake_window = MagicMock()
     fake_window.contentView.return_value = MagicMock()
     appkit.NSWindow = MagicMock()
@@ -299,3 +303,101 @@ class TestLLMPageModels:
 
         build_llm_page(parent, config, MagicMock())
         assert captured.get("key") == "sk-test"
+
+
+# ---------------------------------------------------------------------------
+# New blocker fixes — save button wiring, missing pages, nav, ollama field
+# ---------------------------------------------------------------------------
+
+class TestSaveButtonWired:
+    def test_save_button_has_non_none_target_and_save_action(self, appkit_mock, default_config):
+        from ui.settings.page_general import build_general_page
+        build_general_page(MagicMock(), default_config, MagicMock())
+        call_args = appkit_mock.NSButton.buttonWithTitle_target_action_.call_args
+        title, target, action = call_args[0]
+        assert title == "Save"
+        assert target is not None
+        assert action == "save:"
+
+    def test_save_handler_invokes_save_fn(self, appkit_mock, default_config, tmp_path):
+        from ui.settings.page_general import build_general_page
+        calls = []
+        build_general_page(MagicMock(), default_config, lambda: calls.append(1))
+        # Retrieve the handler passed to the button and call save_ directly
+        call_args = appkit_mock.NSButton.buttonWithTitle_target_action_.call_args
+        _, handler, _ = call_args[0]
+        handler.save_(None)
+        assert calls == [1]
+
+
+class TestWindowNewPages:
+    def test_init_stores_routines_path(self, default_config):
+        from ui.settings.window import SettingsWindow
+        sw = SettingsWindow(default_config, "/tmp/cfg.yaml", routines_path="/tmp/r.json")
+        assert sw._routines_path == "/tmp/r.json"
+
+    def test_init_stores_db_path(self, default_config):
+        from ui.settings.window import SettingsWindow
+        sw = SettingsWindow(default_config, "/tmp/cfg.yaml", db_path="/tmp/m.db")
+        assert sw._db_path == "/tmp/m.db"
+
+    def test_load_page_routines(self, appkit_mock, default_config, tmp_path):
+        from ui.settings.window import SettingsWindow
+        sw = SettingsWindow(default_config, "/tmp/cfg.yaml",
+                            routines_path=str(tmp_path / "routines.json"))
+        sw._window = appkit_mock.NSWindow.alloc() \
+            .initWithContentRect_styleMask_backing_defer_(None, None, None, None)
+        sw._load_page("Routines")
+        assert sw._current_page == "Routines"
+
+    def test_load_page_metrics(self, appkit_mock, default_config):
+        from ui.settings.window import SettingsWindow
+        fake_summary = {
+            "recognition_rate": 1.0, "success_rate": 1.0, "avg_retry": 0,
+            "dangerous_count": 0, "avg_response_ms": 100, "repeated_count": 0,
+        }
+        with patch("ui.settings.page_metrics.get_today_summary", return_value=fake_summary):
+            sw = SettingsWindow(default_config, "/tmp/cfg.yaml")
+            sw._window = appkit_mock.NSWindow.alloc() \
+                .initWithContentRect_styleMask_backing_defer_(None, None, None, None)
+            sw._load_page("Metrics")
+        assert sw._current_page == "Metrics"
+
+    def test_load_page_about(self, appkit_mock, default_config):
+        from ui.settings.window import SettingsWindow
+        sw = SettingsWindow(default_config, "/tmp/cfg.yaml")
+        sw._window = appkit_mock.NSWindow.alloc() \
+            .initWithContentRect_styleMask_backing_defer_(None, None, None, None)
+        sw._load_page("About")
+        assert sw._current_page == "About"
+
+    def test_build_window_creates_segmented_nav_control(self, appkit_mock, default_config):
+        from ui.settings.window import SettingsWindow
+        sw = SettingsWindow(default_config, "/tmp/cfg.yaml")
+        sw.show()
+        assert appkit_mock.NSSegmentedControl \
+            .segmentedControlWithLabels_trackingMode_target_action_.called
+
+
+class TestLLMOllamaField:
+    def test_ollama_uses_text_field_not_model_popup(self, appkit_mock):
+        from ui.settings.page_llm import build_llm_page
+        config = Config()
+        config.llm.provider = "ollama"
+        build_llm_page(MagicMock(), config, MagicMock())
+        # With ollama, NSPopUpButton is only called once (provider selector), not for model
+        popup_calls = appkit_mock.NSPopUpButton.alloc.return_value \
+            .initWithFrame_pullsDown_.call_count
+        assert popup_calls == 1
+
+    def test_ollama_model_field_uses_ollama_model_value(self, appkit_mock):
+        from ui.settings.page_llm import build_llm_page
+        config = Config()
+        config.llm.provider = "ollama"
+        config.llm.ollama_model = "llama3"
+        captured = {}
+        text_field = MagicMock()
+        text_field.setStringValue_.side_effect = lambda v: captured.update({"model": v})
+        appkit_mock.NSTextField.alloc.return_value.initWithFrame_.return_value = text_field
+        build_llm_page(MagicMock(), config, MagicMock())
+        assert captured.get("model") == "llama3"

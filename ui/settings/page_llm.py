@@ -35,13 +35,20 @@ def build_llm_page(parent_view, config: Config, save_fn) -> None:
         lbl3.setFrame_(AppKit.NSMakeRect(20, 360, 100, 22))
         parent_view.addSubview_(lbl3)
 
-        model_popup = AppKit.NSPopUpButton.alloc().initWithFrame_pullsDown_(
-            AppKit.NSMakeRect(140, 360, 220, 22), False
-        )
-        models = CLAUDE_MODELS if config.llm.provider == "claude" else OPENAI_MODELS
-        for m in models:
-            model_popup.addItemWithTitle_(m)
-        parent_view.addSubview_(model_popup)
+        if config.llm.provider == "ollama":
+            model_field = AppKit.NSTextField.alloc().initWithFrame_(
+                AppKit.NSMakeRect(140, 360, 220, 22)
+            )
+            model_field.setStringValue_(config.llm.ollama_model)
+            parent_view.addSubview_(model_field)
+        else:
+            model_popup = AppKit.NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                AppKit.NSMakeRect(140, 360, 220, 22), False
+            )
+            models = CLAUDE_MODELS if config.llm.provider == "claude" else OPENAI_MODELS
+            for m in models:
+                model_popup.addItemWithTitle_(m)
+            parent_view.addSubview_(model_popup)
 
         test_btn = AppKit.NSButton.buttonWithTitle_target_action_("Test Connection", None, None)
         test_btn.setFrame_(AppKit.NSMakeRect(140, 320, 150, 32))

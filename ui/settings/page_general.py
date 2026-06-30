@@ -2,6 +2,14 @@
 from config.loader import Config
 
 
+class _SaveHandler:
+    def __init__(self, fn):
+        self._fn = fn
+
+    def save_(self, sender):
+        self._fn()
+
+
 def build_general_page(parent_view, config: Config, save_fn) -> None:
     try:
         import AppKit
@@ -14,15 +22,15 @@ def build_general_page(parent_view, config: Config, save_fn) -> None:
         _build_label(parent_view, "TTS Voice:", 20, 360)
         voice_field = _build_text_field(parent_view, config.tts.voice, 140, 360)
 
-        save_btn = AppKit.NSButton.buttonWithTitle_target_action_("Save", None, None)
-        save_btn.setFrame_(AppKit.NSMakeRect(550, 20, 100, 32))
-
         def on_save():
             config.activation.wake_phrase = wake_field.stringValue()
             config.activation.hotkey_binding = hotkey_field.stringValue()
             config.tts.voice = voice_field.stringValue()
             save_fn()
 
+        save_handler = _SaveHandler(on_save)
+        save_btn = AppKit.NSButton.buttonWithTitle_target_action_("Save", save_handler, "save:")
+        save_btn.setFrame_(AppKit.NSMakeRect(550, 20, 100, 32))
         parent_view.addSubview_(save_btn)
     except ImportError:
         pass
