@@ -13,3 +13,13 @@ where = ["."]
 
 [project.scripts]
 voicedesk = "main:main"
+
+[tool.py2app]
+app = ["main.py"]
+argv_emulation = false
+packages = [
+    "anthropic", "openai", "pyautogui", "pynput",
+    "faster_whisper", "sounddevice", "numpy", "PIL",
+    "rumps", "AppKit", "Quartz", "yaml", "matplotlib",
+    "openwakeword",
+]

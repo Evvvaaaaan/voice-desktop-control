@@ -36,3 +36,5 @@ env/
 .env
 .env.local
 config.local.yaml
+data/
+config.yaml.bak
