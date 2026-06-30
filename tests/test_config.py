@@ -1,8 +1,6 @@
 import pytest
 import yaml
-import tempfile
-import os
-from config.loader import load_config, save_config, Config, STTConfig, LLMConfig
+from config.loader import load_config, save_config
 
 def test_load_defaults(default_config_dict, tmp_path):
     cfg_file = tmp_path / "config.yaml"
