@@ -1,9 +1,9 @@
 import sqlite3
-from datetime import date
+from datetime import datetime, timezone
 
 
 def get_today_summary(db_path: str = "data/command_history.db") -> dict:
-    today = date.today().isoformat()
+    today = datetime.now(timezone.utc).date().isoformat()
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
