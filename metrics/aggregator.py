@@ -1,21 +1,31 @@
 import sqlite3
+import os
 from datetime import datetime, timezone
 
 
+def _empty_summary() -> dict:
+    return {
+        "recognition_rate": 0.0, "success_rate": 0.0,
+        "avg_retry": 0.0, "dangerous_count": 0,
+        "avg_response_ms": 0, "repeated_count": 0,
+    }
+
+
 def get_today_summary(db_path: str = "data/command_history.db") -> dict:
+    if not os.path.exists(db_path):
+        return _empty_summary()
     today = datetime.now(timezone.utc).date().isoformat()
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT * FROM events WHERE timestamp LIKE ?", (f"{today}%",)
-        ).fetchall()
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM events WHERE timestamp LIKE ?", (f"{today}%",)
+            ).fetchall()
+    except sqlite3.OperationalError:
+        return _empty_summary()
 
     if not rows:
-        return {
-            "recognition_rate": 0.0, "success_rate": 0.0,
-            "avg_retry": 0.0, "dangerous_count": 0,
-            "avg_response_ms": 0, "repeated_count": 0,
-        }
+        return _empty_summary()
 
     total = len(rows)
     high_conf = sum(1 for r in rows if r["stt_confidence"] >= 0.7)

@@ -1,4 +1,4 @@
-import subprocess
+# stt/macos_speech.py
 import tempfile
 import os
 from stt.base import STTBase
@@ -6,19 +6,27 @@ from stt.base import STTBase
 
 class MacOSSpeechAdapter(STTBase):
     def transcribe(self, audio_bytes: bytes) -> str:
+        try:
+            import speech_recognition as sr
+        except ImportError:
+            print("[STT] Error: speech_recognition library is missing!")
+            return ""
+
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             f.write(audio_bytes)
             tmp_path = f.name
+
         try:
-            result = subprocess.run(
-                ["python3", "-c",
-                 f"import speech_recognition as sr; r=sr.Recognizer(); "
-                 f"af=sr.AudioFile('{tmp_path}'); audio=r.record(af); "
-                 f"print(r.recognize_google(audio, language='ko-KR'))"],
-                capture_output=True, text=True, timeout=10
-            )
-            return result.stdout.strip()
-        except Exception:
+            r = sr.Recognizer()
+            with sr.AudioFile(tmp_path) as source:
+                audio = r.record(source)
+            text = r.recognize_google(audio, language="ko-KR")
+            return text.strip()
+        except Exception as e:
+            print(f"[STT] Transcription failed: {e}")
             return ""
         finally:
-            os.unlink(tmp_path)
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass

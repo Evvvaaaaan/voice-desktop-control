@@ -1,10 +1,49 @@
 # main.py
 import io
 import os
+import sys
 import threading
 import wave
 
-from config.loader import load_config
+def _pre_load_portaudio() -> None:
+    """Extract and load libportaudio.dylib from python314.zip if inside an app bundle, and patch paths."""
+    import zipfile
+    import tempfile
+    import types
+
+    zip_path = None
+    for p in sys.path:
+        if p.endswith(".zip") and os.path.exists(p):
+            zip_path = p
+            break
+
+    if not zip_path:
+        return
+
+    try:
+        tmp_dir = tempfile.gettempdir()
+        dest_dir = os.path.join(tmp_dir, "portaudio-binaries")
+        os.makedirs(dest_dir, exist_ok=True)
+        dest_path = os.path.join(dest_dir, "libportaudio.dylib")
+
+        with zipfile.ZipFile(zip_path, 'r') as z:
+            dylib_names = [name for name in z.namelist() if "libportaudio.dylib" in name]
+            if dylib_names:
+                dylib_data = z.read(dylib_names[0])
+                with open(dest_path, "wb") as f:
+                    f.write(dylib_data)
+
+        # Inject mock module to intercept sounddevice's internal _sounddevice_data lookup
+        dummy_mod = types.ModuleType("_sounddevice_data")
+        dummy_mod.__path__ = [tmp_dir]
+        sys.modules["_sounddevice_data"] = dummy_mod
+        
+        print(f"[Sounddevice] Patched _sounddevice_data.__path__ to {tmp_dir} with dylib in {dest_path}")
+    except Exception as e:
+        print(f"[Sounddevice] Pre-loading & patching PortAudio failed: {e}")
+
+
+from config.loader import Config, load_config, save_config
 from stt import get_stt_adapter
 from llm import get_llm_adapter
 from safety.guard import SafetyGuard
@@ -18,18 +57,33 @@ from ui.notch_hud import NotchHUD
 from ui.menubar import VoiceDeskMenuBar
 from ui.settings.window import SettingsWindow
 
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.yaml")
-DB_PATH = os.path.join(os.path.dirname(__file__), "data", "command_history.db")
-ROUTINES_PATH = os.path.join(os.path.dirname(__file__), "data", "routines.json")
+APP_NAME = "VoiceDesk"
 
 
-def record_audio(duration: int = 5, sample_rate: int = 16000) -> bytes:
-    """Record audio from the microphone and return WAV bytes (16kHz, mono, int16)."""
-    import sounddevice as sd
+def _default_state_dir() -> str:
+    override = os.environ.get("VOICEDESK_HOME")
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
+    if sys.platform == "darwin":
+        return os.path.join(
+            os.path.expanduser("~"), "Library", "Application Support", APP_NAME
+        )
+    return os.path.join(os.path.expanduser("~"), ".voicedesk")
 
-    audio = sd.rec(int(duration * sample_rate), samplerate=sample_rate,
-                   channels=1, dtype="int16")
-    sd.wait()
+
+STATE_DIR = _default_state_dir()
+CONFIG_PATH = os.environ.get("VOICEDESK_CONFIG", os.path.join(STATE_DIR, "config.yaml"))
+DB_PATH = os.environ.get("VOICEDESK_DB", os.path.join(STATE_DIR, "command_history.db"))
+ROUTINES_PATH = os.environ.get("VOICEDESK_ROUTINES", os.path.join(STATE_DIR, "routines.json"))
+
+
+def _sync_runtime_env() -> None:
+    os.environ["VOICEDESK_CONFIG"] = CONFIG_PATH
+    os.environ["VOICEDESK_DB"] = DB_PATH
+    os.environ["VOICEDESK_ROUTINES"] = ROUTINES_PATH
+
+
+def _wav_bytes(audio, sample_rate: int) -> bytes:
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
         wf.setnchannels(1)
@@ -39,69 +93,231 @@ def record_audio(duration: int = 5, sample_rate: int = 16000) -> bytes:
     return buf.getvalue()
 
 
+def record_audio(duration: int = 5, sample_rate: int = 16000, on_level=None,
+                 stop_on_silence: bool = False,
+                 no_speech_timeout: float | None = None) -> bytes:
+    """Record audio from the microphone and return WAV bytes (16kHz, mono, int16).
+
+    When `on_level` is given, records via a streaming InputStream and calls
+    `on_level(rms)` (~10x/sec, rms normalized to 0..1) as audio arrives, for a
+    live level meter. When omitted, behavior is unchanged (sd.rec + sd.wait).
+
+    With `stop_on_silence` (streaming path only), `duration` acts as a maximum:
+    recording ends early once speech has been heard and is followed by ~1.2s of
+    silence, so short commands don't wait out the full window and long commands
+    aren't cut mid-sentence (pass a larger `duration`). `no_speech_timeout`
+    additionally ends the recording if speech hasn't STARTED within that many
+    seconds — used by follow-up listening so silence returns to idle quickly.
+    """
+    import sounddevice as sd
+
+    if on_level is None:
+        audio = sd.rec(int(duration * sample_rate), samplerate=sample_rate,
+                       channels=1, dtype="int16")
+        sd.wait()
+        return _wav_bytes(audio, sample_rate)
+
+    import numpy as np
+
+    frames = []
+    blocksize = int(sample_rate * 0.1)  # ~100ms per callback
+    done = threading.Event()
+    SPEECH_AMP = 500           # int16 amplitude that counts as speech
+    SILENCE_BLOCKS = 12        # ~1.2s of trailing silence ends the utterance
+    vad = {"in_speech": False, "silence_run": 0, "blocks": 0}
+
+    def _cb(indata, _n, _t, _status):
+        frames.append(indata.copy())
+        try:
+            rms = float(np.sqrt(np.mean(indata.astype("float32") ** 2)))
+            on_level(min(rms / 3000.0, 1.0))  # int16 rms → ~0..1
+        except Exception:
+            pass
+        if not stop_on_silence:
+            return
+        try:
+            vad["blocks"] += 1
+            if int(np.abs(indata).max()) >= SPEECH_AMP:
+                vad["in_speech"] = True
+                vad["silence_run"] = 0
+            elif vad["in_speech"]:
+                vad["silence_run"] += 1
+                if vad["silence_run"] >= SILENCE_BLOCKS:
+                    done.set()
+            elif (no_speech_timeout is not None
+                    and vad["blocks"] * 0.1 >= no_speech_timeout):
+                done.set()
+        except Exception:
+            pass
+
+    with sd.InputStream(samplerate=sample_rate, channels=1, dtype="int16",
+                        blocksize=blocksize, callback=_cb):
+        if stop_on_silence:
+            elapsed_ms = 0
+            while elapsed_ms < duration * 1000 and not done.is_set():
+                sd.sleep(100)
+                elapsed_ms += 100
+        else:
+            sd.sleep(int(duration * 1000))
+
+    audio = np.concatenate(frames) if frames else np.zeros((0, 1), dtype="int16")
+    return _wav_bytes(audio, sample_rate)
+
+
+def _provider_info(cfg):
+    """(stt, llm, llm_model, tts, tts_voice) for the notch provider panel."""
+    llm_model = {
+        "claude": cfg.llm.claude_model,
+        "openai": cfg.llm.openai_model,
+        "nvidia": cfg.llm.nvidia_model,
+    }.get(cfg.llm.provider, cfg.llm.ollama_model)
+    tts_voice = cfg.tts.nvidia_voice if cfg.tts.provider == "nvidia" else cfg.tts.voice
+    return (cfg.stt.provider, cfg.llm.provider, llm_model, cfg.tts.provider, tts_voice)
+
+
 def _ensure_data_dir():
-    os.makedirs(os.path.join(os.path.dirname(__file__), "data"), exist_ok=True)
+    for path in (CONFIG_PATH, DB_PATH, ROUTINES_PATH):
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+    if not os.path.exists(CONFIG_PATH):
+        save_config(Config(), CONFIG_PATH)
 
 
-def _record_command(agent: Agent, hud: NotchHUD, stt_adapter) -> None:
-    hud.set_state("listening")
-    audio_bytes = record_audio()
+# One command at a time: a second hotkey press / duplicate wake-word fire while
+# a command is being recorded or executed must not start an overlapping session.
+_COMMAND_LOCK = threading.Lock()
+# An activation that arrives while a command is still running is remembered
+# here instead of being dropped, and listening restarts as soon as the current
+# command finishes — so back-to-back voice commands don't lose the last one.
+_PENDING_ACTIVATION = threading.Event()
 
-    hud.set_state("processing")
-    command = stt_adapter.transcribe(audio_bytes)
-    if not command.strip():
-        hud.set_state("idle")
+
+def _record_command(agent: Agent, hud: NotchHUD, stt_adapter,
+                    follow_up: bool = False) -> None:
+    if not _COMMAND_LOCK.acquire(blocking=False):
+        _PENDING_ACTIVATION.set()
         return
+    try:
+        first = True
+        while True:
+            hud.set_state("listening")
+            # Follow-up rounds stop quickly when the user stays silent.
+            audio_bytes = record_audio(
+                duration=10, on_level=hud.update_mic_level, stop_on_silence=True,
+                no_speech_timeout=None if first else 5.0,
+            )
 
-    hud.set_state("executing")
-    result = agent.run(command)
-    hud.set_state("success" if result != "취소됨" else "error")
+            hud.set_state("processing")
+            command = stt_adapter.transcribe(audio_bytes)
+            if not command.strip():
+                hud.set_state("idle")
+                return
+            hud.set_transcript(command)
 
-    import time
-    time.sleep(1.5)
-    hud.set_state("idle")
+            hud.set_state("executing")
+            result = agent.run(command)
+            failed = (not result or result == "취소됨"
+                      or result.startswith(("error", "오류")))
+            hud.set_state("error" if failed else "success")
+            if failed or not follow_up:
+                return
+            # Continuous mode: brief success display, then listen again
+            # without requiring the wake word.
+            import time
+            time.sleep(1.5)
+            hud.set_transcript("")
+            first = False
+    except Exception as e:
+        # A dead thread would leave the HUD stuck in its last state forever.
+        import sys
+        import traceback
+        print(f"[Command] Unhandled error: {e}", file=sys.stderr)
+        traceback.print_exc()
+        try:
+            hud.set_state("error")
+            from actions.tts import speak
+            speak("오류가 발생했어요. 로그를 확인해 주세요.")
+        except Exception:
+            pass
+    finally:
+        import time
+        time.sleep(1.5)
+        hud.set_transcript("")
+        hud.set_state("idle")
+        _COMMAND_LOCK.release()
+        # The user tried to speak while this command was running — start
+        # listening again right away so that command isn't lost.
+        if _PENDING_ACTIVATION.is_set():
+            _PENDING_ACTIVATION.clear()
+            threading.Thread(
+                target=_record_command, args=(agent, hud, stt_adapter),
+                kwargs={"follow_up": follow_up}, daemon=True,
+            ).start()
 
 
 def main():
+    _pre_load_portaudio()
+    _sync_runtime_env()
     _ensure_data_dir()
     config = load_config(CONFIG_PATH)
 
     stt = get_stt_adapter(config)
     llm = get_llm_adapter(config)
-    guard = SafetyGuard(require_confirmation=config.safety.require_confirmation)
     collector = MetricsCollector(DB_PATH)
     detector = RoutineDetector(DB_PATH)
     manager = RoutineManager(ROUTINES_PATH)  # noqa: F841  initialises routines.json
 
     hud = NotchHUD()
+    hud.set_widgets(config.hud.show_clock, config.hud.show_media, config.hud.show_battery,
+                    config.hud.hover_to_expand, config.hud.interaction_sounds)
+    from agent import tools as agent_tools
+    agent_tools.set_text_input_provider(hud.request_text_input)
+    guard = SafetyGuard(require_confirmation=config.safety.require_confirmation,
+                        ui_confirm=hud.arm_danger_prompt)
     hud.show()
     hud.set_state("idle")
+    hud.set_provider_info(*_provider_info(config))
 
-    agent = Agent(llm, guard, collector, detector, config.tts)
+    agent = Agent(llm, guard, collector, detector, config.tts,
+                  on_state=hud.set_state)
 
     def on_activation():
-        t = threading.Thread(target=_record_command, args=(agent, hud, stt), daemon=True)
+        t = threading.Thread(
+            target=_record_command, args=(agent, hud, stt),
+            kwargs={"follow_up": config.activation.continuous}, daemon=True,
+        )
         t.start()
 
     def on_config_change(new_config):
-        nonlocal stt, llm
+        nonlocal stt, llm, config
+        config = new_config
         stt = get_stt_adapter(new_config)
         llm = get_llm_adapter(new_config)
+        agent.set_llm(llm)
+        hud.set_provider_info(*_provider_info(new_config))
+        hud.set_widgets(new_config.hud.show_clock, new_config.hud.show_media,
+                        new_config.hud.show_battery, new_config.hud.hover_to_expand,
+                        new_config.hud.interaction_sounds)
 
     settings_window = SettingsWindow(
         config, CONFIG_PATH, on_config_change,
         routines_path=ROUTINES_PATH, db_path=DB_PATH,
     )
+    hud.set_open_settings_callback(settings_window.show)
 
     if config.activation.hotkey:
         hotkey = HotkeyListener(config.activation.hotkey_binding, on_activation)
         hotkey.start()
 
     if config.activation.wake_word:
-        wakeword = WakeWordListener(config.activation.wake_phrase, on_activation)
+        # Listen for both the configured phrase and "hey jarvis" so the reliable
+        # pre-trained model works alongside the user's chosen phrase.
+        phrases = [config.activation.wake_phrase, "hey jarvis"]
+        wakeword = WakeWordListener(phrases, on_activation)
         wakeword.start()
 
-    app = VoiceDeskMenuBar(agent, hud, settings_window)
+    app = VoiceDeskMenuBar(agent, hud, settings_window, on_activation_callback=on_activation)
     app.run()
 
 

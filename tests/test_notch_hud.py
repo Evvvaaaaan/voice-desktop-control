@@ -1,0 +1,761 @@
+import pytest
+from ui.notch_hud import (
+    NotchHUD,
+    _label,
+    _format_provider_summary,
+    _format_provider_columns,
+    _bar_heights,
+    _frame_for,
+    _SIZES,
+)
+
+
+# ---------------------------------------------------------------------------
+# Pure helpers
+# ---------------------------------------------------------------------------
+
+def test_label_known_and_unknown():
+    assert _label("macos") == "로컬"
+    assert _label("claude") == "Claude"
+    assert _label("nvidia") == "NVIDIA"
+    assert _label("brandnew") == "Brandnew"   # graceful fallback
+    assert _label("") == "—"
+
+
+def test_provider_summary_format():
+    s = _format_provider_summary("macos", "claude", "claude-sonnet-4-6", "nvidia", "x")
+    assert s == "STT 로컬 · LLM Claude · TTS NVIDIA"
+
+
+def test_provider_columns_structure():
+    cols = _format_provider_columns(
+        "macos", "claude", "claude-sonnet-4-6", "nvidia",
+        "Chatterbox-Multilingual.ko-KR.Male",
+    )
+    assert [c["title"] for c in cols] == ["STT", "LLM", "TTS"]
+    assert cols[0]["lines"] == ["로컬"]
+    assert cols[1]["lines"] == ["Claude", "claude-sonnet-4-6"]
+    assert cols[2]["lines"][0] == "NVIDIA"
+    assert cols[2]["lines"][1] == "Chatterbox"   # voice compacted
+
+
+def test_bar_heights_count_and_range():
+    hs = _bar_heights(0.5, 6)
+    assert len(hs) == 6
+    assert all(0.08 <= h <= 1.0 for h in hs)
+
+
+def test_bar_heights_scales_with_level():
+    assert sum(_bar_heights(0.9)) > sum(_bar_heights(0.1))
+
+
+def test_bar_heights_clamps_out_of_range_input():
+    assert all(0.08 <= h <= 1.0 for h in _bar_heights(-5.0))
+    assert all(0.08 <= h <= 1.0 for h in _bar_heights(5.0))
+
+
+def test_bar_heights_custom_count():
+    assert len(_bar_heights(0.5, 3)) == 3
+
+
+def test_frame_for_is_top_centered():
+    x, y, w, h = _frame_for((400, 120), 1440, 900)
+    assert (w, h) == (400, 120)
+    assert x == (1440 - 400) / 2       # horizontally centered
+    assert y == 900 - 120              # top edge flush with screen top
+
+
+# ---------------------------------------------------------------------------
+# Interaction state machine (rendering stubbed so no AppKit is exercised)
+# ---------------------------------------------------------------------------
+
+def _isolated_hud():
+    hud = NotchHUD()
+    hud._initialized = True
+    hud._ensure_init = lambda: None
+    hud._render = lambda: None
+    hud._render_bars = lambda: None
+    hud._schedule_hover_expand = lambda: None
+    return hud
+
+
+def test_visual_idle_substates():
+    hud = _isolated_hud()
+    assert hud._visual() == "idle_collapsed"
+    hud._hovering = True
+    assert hud._visual() == "idle_peek"
+    hud._pinned = True
+    assert hud._visual() == "idle_pinned"   # pinned wins over hover
+
+
+def test_visual_non_idle_and_fallback():
+    hud = _isolated_hud()
+    hud._state = "listening"
+    assert hud._visual() == "listening"
+    hud._state = "totally_unknown"
+    assert hud._visual() == "processing"    # safe fallback
+
+
+def test_all_visuals_have_sizes():
+    for key in ("idle_collapsed", "idle_peek", "idle_pinned", "listening",
+                "processing", "executing", "success", "error", "danger_confirm"):
+        assert key in _SIZES
+
+
+def test_hover_dwell_expands_only_after_fire():
+    hud = _isolated_hud()
+    hud._hover_enter()
+    assert hud._hover_inside is True
+    assert hud._hovering is False           # dwell pending, not expanded yet
+    hud._hover_expand_fire()
+    assert hud._hovering is True
+
+
+def test_hover_exit_before_dwell_cancels_expansion():
+    hud = _isolated_hud()
+    hud._hover_enter()
+    hud._hover_exit()
+    hud._hover_expand_fire()                # timer fires late, pointer already gone
+    assert hud._hovering is False
+
+
+def test_click_toggles_pin_when_idle():
+    hud = _isolated_hud()
+    hud._toggle_pin()
+    assert hud._pinned is True
+    hud._toggle_pin()
+    assert hud._pinned is False
+
+
+def test_click_ignored_when_not_idle():
+    hud = _isolated_hud()
+    hud._state = "processing"
+    hud._toggle_pin()
+    assert hud._pinned is False
+
+
+def test_set_state_non_idle_resets_expansion():
+    hud = _isolated_hud()
+    hud._pinned = True
+    hud._hovering = True
+    hud._hover_inside = True
+    hud.set_state("listening")
+    assert hud._state == "listening"
+    assert hud._pinned is False
+    assert hud._hovering is False
+    assert hud._hover_inside is False
+
+
+def test_set_provider_info_and_mic_level_store():
+    hud = _isolated_hud()
+    hud.set_provider_info("macos", "ollama", "llama3", "macos", "Yuna")
+    assert hud._provider == ("macos", "ollama", "llama3", "macos", "Yuna")
+    hud.update_mic_level(0.7)
+    assert hud._mic_level == 0.7
+
+
+def test_update_metrics_contract_preserved():
+    hud = _isolated_hud()
+    hud.update_metrics({"success": 0.94})
+    assert hud._metrics == {"success": 0.94}
+
+
+# ---------------------------------------------------------------------------
+# Physical-notch sizing + transcript display
+# ---------------------------------------------------------------------------
+
+from ui.notch_hud import _visual_size, _truncate
+
+
+def test_visual_size_without_notch_is_passthrough():
+    w, h = _SIZES["processing"]
+    assert _visual_size("processing") == (w, h, h)
+    cw, ch = _SIZES["idle_collapsed"]
+    assert _visual_size("idle_collapsed") == (cw, ch, ch)
+
+
+def test_visual_size_adds_notch_inset_to_expanded_visuals():
+    w, h = _SIZES["listening"]
+    total_w, total_h, content_h = _visual_size(
+        "listening", top_inset=32.0, notch_size=(185.0, 32.0)
+    )
+    assert total_w == w
+    assert total_h == h + 32.0     # window extends behind the notch band
+    assert content_h == h          # content stays in the visible region
+
+
+def test_visual_size_collapsed_wraps_physical_notch_with_lip():
+    # NotchNook look: a bit wider than the notch, small lip below the menu bar.
+    from ui.notch_hud import _COLLAPSED_EXTRA_W, _COLLAPSED_LIP
+    w, th, ch = _visual_size(
+        "idle_collapsed", top_inset=32.0, notch_size=(185.0, 32.0)
+    )
+    assert w == 185.0 + _COLLAPSED_EXTRA_W
+    assert th == ch == 32.0 + _COLLAPSED_LIP
+
+
+def test_truncate():
+    assert _truncate("short") == "short"
+    long = "가" * 60
+    out = _truncate(long, 44)
+    assert len(out) == 44 and out.endswith("…")
+
+
+def test_set_transcript_stores_stripped_text():
+    hud = _isolated_hud()
+    hud.set_transcript("  크롬 열어줘  ")
+    assert hud._transcript == "크롬 열어줘"
+    hud.set_transcript("")
+    assert hud._transcript == ""
+
+
+# ---------------------------------------------------------------------------
+# Danger-confirm buttons
+# ---------------------------------------------------------------------------
+
+class _FakeDecision:
+    def __init__(self):
+        self.value = None
+
+    def resolve(self, allow):
+        if self.value is None:
+            self.value = allow
+
+
+def test_danger_resolve_routes_to_armed_decision():
+    hud = _isolated_hud()
+    d = _FakeDecision()
+    hud.arm_danger_prompt(d)
+    hud._danger_resolve(True)
+    assert d.value is True
+    assert hud._danger_decision is None      # one-shot
+
+
+def test_danger_resolve_without_armed_decision_is_noop():
+    hud = _isolated_hud()
+    hud._danger_resolve(True)                # must not raise
+
+
+def test_click_at_routes_danger_buttons_and_falls_back_to_pin():
+    hud = _isolated_hud()
+    d = _FakeDecision()
+    hud.arm_danger_prompt(d)
+    hud._danger_hit_zones = [((110, 10, 100, 28), True), ((226, 10, 100, 28), False)]
+    hud._click_at(160, 24)                    # inside 실행
+    assert d.value is True
+    # outside any zone → pin toggle (idle only; here state is idle)
+    hud._danger_hit_zones = []
+    hud._click_at(5, 5)
+    assert hud._pinned is True
+
+
+# ---------------------------------------------------------------------------
+# NotchNook-style widgets (clock / now playing)
+# ---------------------------------------------------------------------------
+
+from ui.notch_hud import _format_clock, _media_line, _pinned_size, _PINNED_WITH_WIDGETS
+
+
+def test_format_clock_korean():
+    from datetime import datetime
+    time_s, date_s = _format_clock(datetime(2026, 7, 2, 16, 5))   # Thursday
+    assert time_s == "16:05"
+    assert date_s == "7월 2일 목요일"
+
+
+def test_media_line_with_and_without_track():
+    assert _media_line(("멍멍이", "노라조")) == ("멍멍이", "노라조")
+    title, artist = _media_line(None)
+    assert title == "재생 중인 음악 없음" and artist == ""
+    long_title = "가" * 40
+    assert _media_line((long_title, ""))[0].endswith("…")
+
+
+def test_pinned_size_grows_only_with_widgets():
+    assert _pinned_size(True, True) == _PINNED_WITH_WIDGETS
+    assert _pinned_size(True, False) == _PINNED_WITH_WIDGETS
+    assert _pinned_size(False, False) == _SIZES["idle_pinned"]
+
+
+def test_set_widgets_stores_flags():
+    hud = _isolated_hud()
+    hud.set_widgets(False, True)
+    assert hud._show_clock is False and hud._show_media is True
+    # New options default true and are individually settable.
+    assert hud._show_battery is True
+    assert hud._hover_to_expand is True
+    assert hud._interaction_sounds is True
+
+
+def test_set_widgets_stores_new_options():
+    hud = _isolated_hud()
+    hud.set_widgets(True, True, show_battery=False, hover_to_expand=False,
+                    interaction_sounds=False)
+    assert hud._show_battery is False
+    assert hud._hover_to_expand is False
+    assert hud._interaction_sounds is False
+
+
+def test_hover_to_expand_false_disables_dwell_schedule():
+    """When the user turns off auto-expand-on-hover, entering the pill must
+    not arm the dwell timer at all — only a click should ever expand it."""
+    hud = NotchHUD()
+    hud._initialized = True
+    hud._ensure_init = lambda: None
+    hud._render = lambda: None
+    hud.set_widgets(True, True, hover_to_expand=False)
+    hud._hover_enter()
+    assert hud._hover_inside is True
+    assert hud._hover_timer is None   # no dwell timer armed
+    hud._toggle_pin()                 # click still works
+    assert hud._pinned is True
+
+
+def test_render_payload_omits_battery_when_disabled():
+    hud = _isolated_hud()
+    hud.set_widgets(True, True, show_battery=False)
+    hud._pinned = True
+    hud._state = "idle"
+    payload = hud._render_payload()
+    assert payload["battery"] == ""
+    assert payload["batteryPercent"] is None
+
+
+def test_render_payload_carries_structured_battery_fields(mocker):
+    mocker.patch("ui.notch_hud._battery_status", return_value=(42, True))
+    hud = _isolated_hud()
+    hud.set_widgets(True, True, show_battery=True)
+    hud._pinned = True
+    hud._state = "idle"
+    payload = hud._render_payload()
+    assert payload["batteryPercent"] == 42
+    assert payload["batteryCharging"] is True
+    assert payload["battery"] == "⚡ 42%"
+
+
+def test_set_open_settings_callback_invoked_on_event():
+    hud = _isolated_hud()
+    calls = []
+    hud.set_open_settings_callback(lambda: calls.append(1))
+    hud._on_swift_event({"event": "openSettings"})
+    assert calls == [1]
+
+
+def test_open_settings_event_survives_missing_callback():
+    hud = _isolated_hud()
+    hud._on_swift_event({"event": "openSettings"})   # must not raise
+
+
+def test_render_payload_carries_interaction_sounds_flag():
+    hud = _isolated_hud()
+    hud.set_widgets(True, True, interaction_sounds=False)
+    payload = hud._render_payload()
+    assert payload["interactionSounds"] is False
+
+
+# ---------------------------------------------------------------------------
+# Notch text input (long-text confirmation)
+# ---------------------------------------------------------------------------
+
+from ui.notch_hud import TextInputRequest, _battery_info, _battery_status
+
+
+def test_text_input_request_resolve_and_timeout():
+    r = TextInputRequest()
+    r.resolve("hello")
+    r.resolve("late")                      # first resolution wins
+    assert r.wait(0.01) == "hello"
+    assert TextInputRequest().wait(0.01) is None   # timeout → None
+
+
+def test_request_text_input_returns_submitted_text():
+    import threading
+    hud = _isolated_hud()
+    hud.set_state = lambda s: setattr(hud, "_state", s)
+
+    def submit():
+        import time
+        time.sleep(0.05)
+        hud._on_swift_event({"event": "textSubmit", "text": "고친 내용"})
+
+    threading.Thread(target=submit, daemon=True).start()
+    hud._state = "executing"
+    value = hud.request_text_input("확인해 주세요", "원래 내용", timeout=2.0)
+    assert value == "고친 내용"
+    assert hud._state == "executing"       # state restored after input
+    assert hud._text_request is None
+
+
+def test_request_text_input_cancel_returns_none():
+    import threading
+    hud = _isolated_hud()
+    hud.set_state = lambda s: setattr(hud, "_state", s)
+
+    def cancel():
+        import time
+        time.sleep(0.05)
+        hud._on_swift_event({"event": "textCancel"})
+
+    threading.Thread(target=cancel, daemon=True).start()
+    hud._state = "executing"
+    assert hud.request_text_input("확인", "draft", timeout=2.0) is None
+
+
+def test_text_input_visual_has_size():
+    assert "text_input" in _SIZES
+
+
+# ---------------------------------------------------------------------------
+# Widget auto-refresh tick chain (regression: _arm_widget_tick was defined
+# but never called from anywhere, so the clock/media never updated without
+# closing and reopening the panel)
+# ---------------------------------------------------------------------------
+
+def test_render_payload_arms_tick_when_pinned(mocker):
+    hud = _isolated_hud()
+    mock_arm = mocker.patch.object(hud, "_arm_widget_tick")
+    hud._pinned = True
+    hud._state = "idle"
+    hud._render_payload()
+    mock_arm.assert_called_once()
+
+
+def test_render_payload_does_not_arm_tick_when_collapsed(mocker):
+    hud = _isolated_hud()
+    mock_arm = mocker.patch.object(hud, "_arm_widget_tick")
+    hud._pinned = False
+    hud._state = "idle"
+    hud._render_payload()
+    mock_arm.assert_not_called()
+
+
+def test_arm_widget_tick_starts_a_real_timer():
+    hud = _isolated_hud()
+    hud._pinned = True
+    hud._state = "idle"
+    assert hud._tick_timer is None
+    hud._arm_widget_tick()
+    assert hud._tick_armed is True
+    assert hud._tick_timer is not None
+    hud._tick_timer.cancel()   # don't let the real 5s timer fire during tests
+
+
+def test_arm_widget_tick_is_idempotent_while_armed():
+    """A second render while a tick is already pending must not stack timers."""
+    hud = _isolated_hud()
+    hud._pinned = True
+    hud._state = "idle"
+    hud._arm_widget_tick()
+    first_timer = hud._tick_timer
+    hud._arm_widget_tick()
+    assert hud._tick_timer is first_timer
+    first_timer.cancel()
+
+
+def test_widget_tick_refreshes_media_and_rerenders_while_pinned(mocker):
+    hud = _isolated_hud()
+    hud._pinned = True
+    hud._state = "idle"
+    mock_fetch = mocker.patch.object(hud, "_fetch_media_async")
+    render_calls = []
+    hud._render = lambda: render_calls.append(1)
+    hud._widget_tick()
+    assert hud._tick_armed is False
+    mock_fetch.assert_called_once()
+    assert render_calls == [1]
+
+
+def test_widget_tick_stops_reraming_once_panel_closes():
+    """The tick must NOT keep firing after the panel is closed — closing sets
+    _pinned False, so _widget_tick's guard should skip refresh+re-render,
+    and nothing re-arms the chain."""
+    hud = _isolated_hud()
+    hud._pinned = False
+    hud._state = "idle"
+    render_calls = []
+    hud._render = lambda: render_calls.append(1)
+    hud._widget_tick()
+    assert render_calls == []
+    assert hud._tick_armed is False
+
+
+def test_widget_tick_reachms_via_real_render_payload_chain():
+    """End-to-end (minus the actual 5s wait): _widget_tick -> _render ->
+    _render_payload -> _arm_widget_tick re-arms a fresh timer, proving the
+    refresh chain sustains itself for as long as the panel stays pinned."""
+    hud = _isolated_hud()
+    hud._pinned = True
+    hud._state = "idle"
+    hud._render = lambda: hud._render_payload()   # exercise the real payload builder
+    hud._fetch_media_async = lambda: None
+
+    hud._widget_tick()
+
+    assert hud._tick_armed is True   # re-armed by the render_payload call above
+    hud._tick_timer.cancel()
+
+
+# ---------------------------------------------------------------------------
+# Album artwork (thumbnail fetch, caching on track change, payload wiring)
+# ---------------------------------------------------------------------------
+
+def _fake_appkit_with_running(mocker, bundle_id_present):
+    import types
+    fake_appkit = types.ModuleType("AppKit")
+    fake_appkit.NSRunningApplication = mocker.Mock()
+    fake_appkit.NSRunningApplication.runningApplicationsWithBundleIdentifier_.side_effect = (
+        lambda bid: [object()] if bid == bundle_id_present else []
+    )
+    return fake_appkit
+
+
+def test_now_playing_returns_app_name_for_control_routing(mocker):
+    """The third element (app name) is what lets prev/next buttons know
+    which app to send AppleScript control commands to."""
+    import sys
+    from ui.notch_hud import _now_playing
+
+    mocker.patch.dict(sys.modules, {"AppKit": _fake_appkit_with_running(mocker, "com.apple.Music")})
+    mocker.patch(
+        "ui.notch_hud.subprocess.run",
+        return_value=mocker.Mock(returncode=0, stdout="Song|||Artist|||playing\n"),
+    )
+    result = _now_playing()
+    assert result == ("Song", "Artist", "Music", True)
+
+
+def test_now_playing_includes_paused_tracks_not_just_playing(mocker):
+    """Regression: pausing must not make _now_playing (and therefore the
+    media card + its resume button) disappear."""
+    import sys
+    from ui.notch_hud import _now_playing
+
+    mocker.patch.dict(sys.modules, {"AppKit": _fake_appkit_with_running(mocker, "com.apple.Music")})
+    mocker.patch(
+        "ui.notch_hud.subprocess.run",
+        return_value=mocker.Mock(returncode=0, stdout="Song|||Artist|||paused\n"),
+    )
+    result = _now_playing()
+    assert result == ("Song", "Artist", "Music", False)
+
+
+def test_fetch_media_async_only_refetches_artwork_on_track_change(mocker):
+    """Artwork extraction is the expensive part of a refresh — must not
+    happen on every tick, only when the track actually changed."""
+    hud = _isolated_hud()
+    hud._show_media = True
+    hud._media = ("Old Song", "Old Artist", "Music", True)
+    hud._media_artwork = "old_art_b64"
+
+    mocker.patch("ui.notch_hud._now_playing", return_value=("Old Song", "Old Artist", "Music", True))
+    mock_fetch_art = mocker.patch("ui.notch_hud._fetch_artwork")
+
+    hud._fetch_media_async()
+    import time
+    time.sleep(0.05)   # the fetch runs on a background thread
+
+    mock_fetch_art.assert_not_called()
+    assert hud._media_artwork == "old_art_b64"   # unchanged
+
+
+def test_fetch_media_async_refetches_artwork_when_track_changes(mocker):
+    hud = _isolated_hud()
+    hud._show_media = True
+    hud._media = ("Old Song", "Old Artist", "Music", True)
+    hud._media_artwork = "old_art_b64"
+
+    mocker.patch("ui.notch_hud._now_playing", return_value=("New Song", "New Artist", "Spotify", True))
+    mocker.patch("ui.notch_hud._fetch_artwork", return_value="new_art_b64")
+
+    hud._fetch_media_async()
+    import time
+    time.sleep(0.05)
+
+    assert hud._media_artwork == "new_art_b64"
+    assert hud._media == ("New Song", "New Artist", "Spotify", True)
+
+
+def test_fetch_media_async_clears_artwork_when_nothing_playing(mocker):
+    hud = _isolated_hud()
+    hud._show_media = True
+    hud._media = ("Old Song", "Old Artist", "Music", True)
+    hud._media_artwork = "old_art_b64"
+    mocker.patch("ui.notch_hud._now_playing", return_value=None)
+    mock_fetch_art = mocker.patch("ui.notch_hud._fetch_artwork")
+
+    hud._fetch_media_async()
+    import time
+    time.sleep(0.05)
+
+    mock_fetch_art.assert_not_called()
+    assert hud._media_artwork is None
+
+
+def test_render_payload_includes_artwork_and_player_app():
+    hud = _isolated_hud()
+    hud._media = ("Song", "Artist", "Spotify", True)
+    hud._media_artwork = "fake_base64_png"
+    hud._pinned = True
+    hud._state = "idle"
+    payload = hud._render_payload()
+    assert payload["mediaArtwork"] == "fake_base64_png"
+    assert payload["mediaPlayerApp"] == "Spotify"
+
+
+def test_render_payload_empty_artwork_and_app_when_nothing_playing():
+    hud = _isolated_hud()
+    hud._media = None
+    hud._media_artwork = None
+    hud._pinned = True
+    hud._state = "idle"
+    payload = hud._render_payload()
+    assert payload["mediaArtwork"] == ""
+    assert payload["mediaPlayerApp"] == ""
+
+
+def test_pinned_panel_widened_for_media_controls_layout():
+    # Regression guard: the wider layout must stay wide enough to fit an
+    # album art thumbnail + 3 transport buttons alongside the track text.
+    assert _PINNED_WITH_WIDGETS[0] >= 700
+
+
+# ---------------------------------------------------------------------------
+# Saved routines exposed for one-click launch in the pinned panel
+# ---------------------------------------------------------------------------
+
+def test_render_payload_includes_saved_routine_names(mocker, tmp_path):
+    routines_file = tmp_path / "routines.json"
+    routines_file.write_text(
+        '[{"name": "출근 준비", "steps": []}, {"name": "퇴근 정리", "steps": []}]',
+        encoding="utf-8",
+    )
+    mocker.patch.dict("os.environ", {"VOICEDESK_ROUTINES": str(routines_file)})
+    hud = _isolated_hud()
+    hud._pinned = True
+    hud._state = "idle"
+    payload = hud._render_payload()
+    assert payload["routines"] == ["출근 준비", "퇴근 정리"]
+
+
+def test_render_payload_routines_empty_when_no_routines_file(mocker, tmp_path):
+    mocker.patch.dict("os.environ", {"VOICEDESK_ROUTINES": str(tmp_path / "missing.json")})
+    hud = _isolated_hud()
+    hud._pinned = True
+    hud._state = "idle"
+    payload = hud._render_payload()
+    assert payload["routines"] == []
+
+
+def test_render_payload_routines_empty_when_collapsed(mocker, tmp_path):
+    """Routine list is only computed for the pinned panel, not every visual —
+    reading the routines file on every collapsed/listening/etc. render would
+    be pointless I/O for a visual that never shows it."""
+    routines_file = tmp_path / "routines.json"
+    routines_file.write_text('[{"name": "테스트", "steps": []}]', encoding="utf-8")
+    mocker.patch.dict("os.environ", {"VOICEDESK_ROUTINES": str(routines_file)})
+    hud = _isolated_hud()
+    hud._pinned = False
+    hud._state = "idle"
+    payload = hud._render_payload()
+    assert payload["routines"] == []
+
+
+def test_run_routine_event_dispatches_and_speaks(mocker):
+    hud = _isolated_hud()
+    mock_dispatch = mocker.patch("agent.tools.dispatch", return_value="routine_done")
+    mock_speak = mocker.patch("actions.tts.speak")
+
+    hud._on_swift_event({"event": "runRoutine", "name": "출근 준비"})
+    import time
+    time.sleep(0.05)   # runs on a background thread
+
+    mock_dispatch.assert_called_once_with("run_routine", {"name": "출근 준비"})
+    mock_speak.assert_called_once()
+    assert "출근 준비" in mock_speak.call_args.args[0]
+    assert "실패" not in mock_speak.call_args.args[0]
+
+
+def test_run_routine_event_speaks_failure_message(mocker):
+    hud = _isolated_hud()
+    mocker.patch("agent.tools.dispatch", return_value="routine_failed")
+    mock_speak = mocker.patch("actions.tts.speak")
+
+    hud._on_swift_event({"event": "runRoutine", "name": "없는루틴"})
+    import time
+    time.sleep(0.05)
+
+    mock_speak.assert_called_once()
+    assert "실패" in mock_speak.call_args.args[0]
+
+
+def test_run_routine_event_ignores_blank_name(mocker):
+    hud = _isolated_hud()
+    mock_dispatch = mocker.patch("agent.tools.dispatch")
+    hud._on_swift_event({"event": "runRoutine", "name": "  "})
+    mock_dispatch.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Media transport controls (prev/play-pause/next) wired to real playback
+# ---------------------------------------------------------------------------
+
+def test_media_next_event_sends_applescript_to_active_player(mocker):
+    hud = _isolated_hud()
+    hud._media = ("Song", "Artist", "Spotify", True)
+    mock_run = mocker.patch("actions.applescript.run_applescript")
+    mocker.patch.object(hud, "_fetch_media_async")
+
+    hud._on_swift_event({"event": "mediaNext"})
+    import time
+    time.sleep(0.05)
+
+    mock_run.assert_called_once_with('tell application "Spotify" to next track')
+
+
+def test_media_prev_event_sends_applescript(mocker):
+    hud = _isolated_hud()
+    hud._media = ("Song", "Artist", "Music", True)
+    mock_run = mocker.patch("actions.applescript.run_applescript")
+    mocker.patch.object(hud, "_fetch_media_async")
+
+    hud._on_swift_event({"event": "mediaPrev"})
+    import time
+    time.sleep(0.05)
+
+    mock_run.assert_called_once_with('tell application "Music" to previous track')
+
+
+def test_media_play_pause_event_sends_applescript(mocker):
+    hud = _isolated_hud()
+    hud._media = ("Song", "Artist", "Music", True)
+    mock_run = mocker.patch("actions.applescript.run_applescript")
+    mocker.patch.object(hud, "_fetch_media_async")
+
+    hud._on_swift_event({"event": "mediaPlayPause"})
+    import time
+    time.sleep(0.05)
+
+    mock_run.assert_called_once_with('tell application "Music" to playpause')
+
+
+def test_media_control_refetches_after_command(mocker):
+    """A track/prev/next command changes the track — the panel must refresh
+    afterward instead of showing stale info until the next 5s tick."""
+    hud = _isolated_hud()
+    hud._media = ("Song", "Artist", "Music", True)
+    mocker.patch("actions.applescript.run_applescript")
+    mock_fetch = mocker.patch.object(hud, "_fetch_media_async")
+
+    hud._on_swift_event({"event": "mediaNext"})
+    import time
+    time.sleep(0.4)   # command's own 0.3s settle delay + margin
+
+    mock_fetch.assert_called_once()
+
+
+def test_media_control_noop_when_nothing_playing(mocker):
+    hud = _isolated_hud()
+    hud._media = None
+    mock_run = mocker.patch("actions.applescript.run_applescript")
+    hud._on_swift_event({"event": "mediaNext"})
+    mock_run.assert_not_called()

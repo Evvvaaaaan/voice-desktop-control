@@ -6,6 +6,8 @@ class HotkeyListener:
         self._binding = binding
         self._callback = callback
         self._listener = None
+        self._pressed = set()
+        self._fired = False  # edge trigger: one fire per chord press
 
     def _parse_binding(self) -> set:
         parts = self._binding.lower().split("+")
@@ -15,19 +17,32 @@ class HotkeyListener:
         }
         return {key_map.get(p, kb.KeyCode.from_char(p)) for p in parts}
 
-    def start(self) -> None:
-        keys = self._parse_binding()
-        pressed = set()
+    def _canonical(self, key):
+        """Normalize side-specific modifiers (alt_l/alt_r → alt) via pynput."""
+        try:
+            return self._listener.canonical(key)
+        except Exception:
+            return key
 
-        def on_press(key):
-            pressed.add(key)
-            if keys.issubset(pressed):
+    def _on_press(self, key):
+        self._pressed.add(self._canonical(key))
+        if self._keys.issubset(self._pressed):
+            # macOS auto-repeat re-delivers on_press while held; fire only on
+            # the transition into the full chord.
+            if not self._fired:
+                self._fired = True
                 self._callback()
 
-        def on_release(key):
-            pressed.discard(key)
+    def _on_release(self, key):
+        self._pressed.discard(self._canonical(key))
+        if not self._keys.issubset(self._pressed):
+            self._fired = False
 
-        self._listener = kb.Listener(on_press=on_press, on_release=on_release)
+    def start(self) -> None:
+        self._keys = self._parse_binding()
+        self._pressed = set()
+        self._fired = False
+        self._listener = kb.Listener(on_press=self._on_press, on_release=self._on_release)
         self._listener.start()
 
     def stop(self) -> None:

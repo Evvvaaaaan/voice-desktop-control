@@ -1,16 +1,18 @@
 stt:
-  provider: macos          # macos | whisper_api | whisper_local
+  provider: macos # macos | whisper_api | whisper_local
   whisper_api_key: ""
   whisper_local_model: base
 
 llm:
-  provider: ollama         # ollama | claude | openai
+  provider: ollama # ollama | claude | openai | nvidia
   claude_api_key: ""
   claude_model: claude-sonnet-4-6
   openai_api_key: ""
   openai_model: gpt-4o
   ollama_url: http://localhost:11434
   ollama_model: llama3
+  nvidia_api_key: ""
+  nvidia_model: minimaxai/minimax-m3
 
 activation:
   wake_word: true
@@ -19,8 +21,13 @@ activation:
   hotkey_binding: "alt+space"
 
 tts:
+  provider: macos # macos | nvidia
   voice: Yuna
   rate: 200
+  nvidia_api_key: ""
+  nvidia_function_id: "877104f7-e885-42b9-8de8-f6e4c6303969"
+  nvidia_voice: Chatterbox-Multilingual.ko-KR.Male
+  nvidia_language_code: ko-KR
 
 safety:
   require_confirmation: true

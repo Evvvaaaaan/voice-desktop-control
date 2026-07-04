@@ -1,19 +1,26 @@
 # ui/settings/window.py
 from config.loader import Config, save_config
+from ui.settings.actions import make_action_handler, wire_action
+from ui.settings.edit_menu import ensure_standard_edit_menu
 
+_W = 560
+_H = 460
+_TB = 64           # toolbar height
+_CH = _H - _TB    # content area height = 396
 
-class _NavHandler:
-    def __init__(self, load_fn, pages):
-        self._load_fn = load_fn
-        self._pages = pages
-
-    def select_(self, sender):
-        idx = sender.selectedSegment()
-        self._load_fn(self._pages[idx])
-
+_TABS = [
+    ("General",     "gearshape"),
+    ("STT",         "mic"),
+    ("LLM",         "cpu"),
+    ("TTS",         "speaker.wave.2"),
+    ("Routines",    "list.bullet"),
+    ("Metrics",     "chart.bar"),
+    ("Permissions", "lock.shield"),
+    ("About",       "info.circle"),
+]
 
 class SettingsWindow:
-    PAGES = ["General", "STT", "LLM", "Routines", "Metrics", "About"]
+    PAGES = [t[0] for t in _TABS]
 
     def __init__(self, config: Config, config_path: str, on_config_change=None,
                  routines_path: str = "", db_path: str = ""):
@@ -23,7 +30,10 @@ class SettingsWindow:
         self._routines_path = routines_path
         self._db_path = db_path
         self._window = None
-        self._nav_ctrl = None
+        self._body = None
+        self._tab_handler = None  # keep ObjC target alive
+        self._tab_btns = []       # (NSButton, name) for highlight updates
+        self._page_builder = None
         self._current_page = "General"
 
     def _save(self):
@@ -45,71 +55,140 @@ class SettingsWindow:
 
     def _build_window(self) -> None:
         import AppKit
+        ensure_standard_edit_menu()
         self._window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            AppKit.NSMakeRect(200, 200, 700, 500),
-            AppKit.NSWindowStyleMaskTitled
-            | AppKit.NSWindowStyleMaskClosable
-            | AppKit.NSWindowStyleMaskResizable,
-            AppKit.NSBackingStoreBuffered,
-            False,
+            AppKit.NSMakeRect(200, 200, _W, _H),
+            AppKit.NSWindowStyleMaskTitled | AppKit.NSWindowStyleMaskClosable,
+            AppKit.NSBackingStoreBuffered, False,
         )
-        self._window.setTitle_("VoiceDesk Settings")
-        nav_handler = _NavHandler(self._load_page, self.PAGES)
-        seg = AppKit.NSSegmentedControl.segmentedControlWithLabels_trackingMode_target_action_(
-            self.PAGES, AppKit.NSSegmentSwitchTrackingSelectOne, nav_handler, "select:"
+        self._window.setTitle_("VoiceDesk 설정")
+        cv = self._window.contentView()
+
+        # ── Icon Toolbar ─────────────────────────────────────────────────────
+        bar = AppKit.NSView.alloc().initWithFrame_(
+            AppKit.NSMakeRect(0, _CH, _W, _TB)
         )
-        seg.setFrame_(AppKit.NSMakeRect(0, 470, 700, 30))
-        self._window.contentView().addSubview_(seg)
-        self._nav_ctrl = seg
-        self._load_page("General")
+        cv.addSubview_(bar)
+
+        bw = _W // len(_TABS)
+        self._tab_handler = make_action_handler(self._select_tab_from_sender)
+        for i, (name, sym) in enumerate(_TABS):
+            btn = AppKit.NSButton.alloc().initWithFrame_(
+                AppKit.NSMakeRect(i * bw, 1, bw, _TB - 1)
+            )
+            btn.setButtonType_(AppKit.NSButtonTypeMomentaryPushIn)
+            btn.setBordered_(False)
+            btn.setTitle_(name)
+            btn.setFont_(AppKit.NSFont.systemFontOfSize_(10))
+            btn.setImagePosition_(AppKit.NSImageAbove)
+            btn.setTag_(i)
+            wire_action(btn, self._tab_handler, "selectTab:")
+
+            try:
+                cfg = AppKit.NSImageSymbolConfiguration.configurationWithPointSize_weight_(
+                    20, AppKit.NSFontWeightRegular
+                )
+                img = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(sym, None)
+                btn.setImage_(img.imageWithSymbolConfiguration_(cfg))
+            except Exception:
+                pass
+
+            bar.addSubview_(btn)
+            self._tab_btns.append((btn, name))
+
+        # Bottom separator of toolbar
+        sep = AppKit.NSBox.alloc().initWithFrame_(AppKit.NSMakeRect(0, 0, _W, 1))
+        sep.setBoxType_(AppKit.NSBoxSeparator)
+        bar.addSubview_(sep)
+
+        # ── Content Body ─────────────────────────────────────────────────────
+        self._body = AppKit.NSView.alloc().initWithFrame_(
+            AppKit.NSMakeRect(0, 0, _W, _CH)
+        )
+        cv.addSubview_(self._body)
+
+        self._select_tab("General")
+
+    def _select_tab_from_sender(self, sender) -> None:
+        try:
+            idx = int(sender.tag())
+        except Exception:
+            return
+        if 0 <= idx < len(_TABS):
+            self._select_tab(_TABS[idx][0])
+
+    def _select_tab(self, name: str) -> None:
+        import AppKit
+
+        self._current_page = name
+        for btn, n in self._tab_btns:
+            if n == name:
+                btn.setContentTintColor_(AppKit.NSColor.systemBlueColor())
+            else:
+                btn.setContentTintColor_(AppKit.NSColor.secondaryLabelColor())
+
+        if self._body is None:
+            return
+
+        old_builder = self._page_builder
+        self._page_builder = None
+        if old_builder is not None and hasattr(old_builder, "teardown"):
+            old_builder.teardown()
+        for v in list(self._body.subviews()):
+            v.removeFromSuperview()
+
+        {
+            "General":     self._build_general,
+            "STT":         self._build_stt,
+            "LLM":         self._build_llm,
+            "TTS":         self._build_tts,
+            "Routines":    self._build_routines,
+            "Metrics":     self._build_metrics,
+            "Permissions": self._build_permissions,
+            "About":       self._build_about,
+        }.get(name, lambda: None)()
 
     def _load_page(self, page_name: str) -> None:
-        self._current_page = page_name
-        if self._window:
-            content = self._window.contentView()
-            for v in list(content.subviews()):
-                if v != self._nav_ctrl:
-                    v.removeFromSuperview()
-        page_map = {
-            "General": self._build_general,
-            "STT": self._build_stt,
-            "LLM": self._build_llm,
-            "Routines": self._build_routines,
-            "Metrics": self._build_metrics,
-            "About": self._build_about,
-        }
-        builder = page_map.get(page_name)
-        if builder:
-            builder()
+        try:
+            self._select_tab(page_name)
+        except ImportError:
+            self._current_page = page_name
 
-    def _build_general(self) -> None:
+    def _build_general(self):
         from ui.settings.page_general import build_general_page
-        build_general_page(self._window.contentView(), self._config, self._save)
+        self._page_builder = build_general_page(self._body, self._config, self._save)
 
-    def _build_stt(self) -> None:
+    def _build_stt(self):
         from ui.settings.page_stt import build_stt_page
-        build_stt_page(self._window.contentView(), self._config, self._save)
+        self._page_builder = build_stt_page(self._body, self._config, self._save)
 
-    def _build_llm(self) -> None:
+    def _build_llm(self):
         from ui.settings.page_llm import build_llm_page
-        build_llm_page(self._window.contentView(), self._config, self._save)
+        self._page_builder = build_llm_page(self._body, self._config, self._save)
 
-    def _build_routines(self) -> None:
+    def _build_tts(self):
+        from ui.settings.page_tts import build_tts_page
+        self._page_builder = build_tts_page(self._body, self._config, self._save)
+
+    def _build_routines(self):
         from ui.settings.page_routines import build_routines_page
         from routines.manager import RoutineManager
         try:
-            mgr = RoutineManager(self._routines_path)
-            build_routines_page(self._window.contentView(), self._config, mgr, self._save)
+            build_routines_page(self._body, self._config, RoutineManager(self._routines_path), self._save)
         except Exception:
             pass
 
-    def _build_metrics(self) -> None:
+    def _build_metrics(self):
         from ui.settings.page_metrics import build_metrics_page
         try:
-            build_metrics_page(self._window.contentView(), self._db_path)
+            build_metrics_page(self._body, self._db_path)
         except Exception:
             pass
 
-    def _build_about(self) -> None:
+    def _build_permissions(self):
+        from ui.settings.page_permissions import build_permissions_page
+        self._page_builder = build_permissions_page(self._body)
+
+    def _build_about(self):
         from ui.settings.page_about import build_about_page
-        build_about_page(self._window.contentView())
+        build_about_page(self._body)

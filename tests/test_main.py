@@ -120,6 +120,73 @@ class TestRecordAudio:
         record_audio(duration=1, sample_rate=16000)
         mock_wait.assert_called_once()
 
+class TestRecordAudioStreaming:
+    def test_on_level_called_and_returns_wav(self, mocker):
+        captured = {}
+        levels = []
+
+        class FakeStream:
+            def __init__(self, **kw):
+                captured.update(kw)
+
+            def __enter__(self):
+                block = (np.ones((1600, 1), dtype="int16") * 3000)
+                captured["callback"](block, 1600, None, None)
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        mocker.patch("sounddevice.InputStream", FakeStream)
+        mocker.patch("sounddevice.sleep")
+        from main import record_audio
+        result = record_audio(duration=1, sample_rate=16000, on_level=levels.append)
+
+        assert result[:4] == b"RIFF" and result[8:12] == b"WAVE"
+        assert len(levels) == 1
+        assert levels[0] == pytest.approx(1.0)   # loud block → clamped to 1.0
+
+    def test_default_path_unchanged_without_on_level(self, mocker):
+        fake_audio = np.zeros((16000, 1), dtype="int16")
+        mock_rec = mocker.patch("sounddevice.rec", return_value=fake_audio)
+        mocker.patch("sounddevice.wait")
+        mock_stream = mocker.patch("sounddevice.InputStream")
+        from main import record_audio
+        record_audio(duration=1, sample_rate=16000)
+        mock_rec.assert_called_once()
+        mock_stream.assert_not_called()   # no streaming when on_level is None
+
+
+class TestProviderInfo:
+    def test_selects_model_and_voice_for_active_providers(self):
+        from main import _provider_info
+        from config.loader import Config
+        cfg = Config()
+        cfg.llm.provider = "claude"
+        cfg.llm.claude_model = "claude-sonnet-4-6"
+        cfg.tts.provider = "nvidia"
+        cfg.tts.nvidia_voice = "Chatterbox-Multilingual.ko-KR.Male"
+        assert _provider_info(cfg) == (
+            "macos", "claude", "claude-sonnet-4-6",
+            "nvidia", "Chatterbox-Multilingual.ko-KR.Male",
+        )
+
+    def test_ollama_and_macos_defaults(self):
+        from main import _provider_info
+        from config.loader import Config
+        cfg = Config()
+        assert _provider_info(cfg) == ("macos", "ollama", "llama3", "macos", "Yuna")
+
+
+def test_record_command_passes_mic_level_callback(mocker):
+    rec = mocker.patch("main.record_audio", return_value=b"wav")
+    hud = MagicMock()
+    stt = MagicMock()
+    stt.transcribe.return_value = ""   # short-circuit after processing
+    from main import _record_command
+    _record_command(MagicMock(), hud, stt)
+    assert rec.call_args.kwargs.get("on_level") == hud.update_mic_level
+
 
 # ---------------------------------------------------------------------------
 # VoiceDeskMenuBar
@@ -314,9 +381,10 @@ class TestOrchestratorWiring:
         mocks = self._patch_all(mocker, tmp_path)
         from main import main
         main()
-        mocks["guard"].assert_called_once_with(
-            require_confirmation=mocks["config"].safety.require_confirmation
-        )
+        kwargs = mocks["guard"].call_args.kwargs
+        assert kwargs["require_confirmation"] == mocks["config"].safety.require_confirmation
+        # HUD buttons answer danger confirmations
+        assert kwargs["ui_confirm"] == mocks["hud"].return_value.arm_danger_prompt
 
     def test_hud_show_and_idle_called(self, mocker, tmp_path):
         mocks = self._patch_all(mocker, tmp_path)
@@ -333,6 +401,18 @@ class TestOrchestratorWiring:
         _, kwargs = mocks["settings"].call_args
         assert "routines_path" in kwargs
         assert "db_path" in kwargs
+
+    def test_hud_gear_icon_opens_settings(self, mocker, tmp_path):
+        """The pinned panel's gear icon must open the same Settings window
+        as the menu bar item."""
+        mocks = self._patch_all(mocker, tmp_path)
+        from main import main
+        main()
+        hud_instance = mocks["hud"].return_value
+        settings_instance = mocks["settings"].return_value
+        hud_instance.set_open_settings_callback.assert_called_once_with(
+            settings_instance.show
+        )
 
     def test_menubar_run_called(self, mocker, tmp_path):
         mocks = self._patch_all(mocker, tmp_path)
@@ -439,12 +519,15 @@ class TestConfigHotReload:
         mocker.patch("main.ROUTINES_PATH", str(tmp_path / "data" / "r.json"))
         mocker.patch("main.load_config", return_value=fake_config)
         mocker.patch("main.get_stt_adapter", return_value=MagicMock())
-        mock_llm = mocker.patch("main.get_llm_adapter", return_value=MagicMock())
+        initial_llm = MagicMock()
+        reloaded_llm = MagicMock()
+        mock_llm = mocker.patch("main.get_llm_adapter", side_effect=[initial_llm, reloaded_llm])
         mocker.patch("main.SafetyGuard", return_value=MagicMock())
         mocker.patch("main.MetricsCollector", return_value=MagicMock())
         mocker.patch("main.RoutineDetector", return_value=MagicMock())
         mocker.patch("main.RoutineManager", return_value=MagicMock())
-        mocker.patch("main.Agent", return_value=MagicMock())
+        agent_instance = MagicMock()
+        mocker.patch("main.Agent", return_value=agent_instance)
         mocker.patch("main.NotchHUD", return_value=MagicMock())
         mocker.patch("main.HotkeyListener", return_value=MagicMock())
         mocker.patch("main.WakeWordListener", return_value=MagicMock())
@@ -465,6 +548,7 @@ class TestConfigHotReload:
         assert mock_llm.call_count == 2
         last_call_config = mock_llm.call_args[0][0]
         assert last_call_config is new_config
+        agent_instance.set_llm.assert_called_once_with(reloaded_llm)
 
 
 # ---------------------------------------------------------------------------
@@ -477,3 +561,261 @@ def test_main_module_safe_to_import():
     assert callable(main.record_audio)
     assert callable(main.main)
     assert callable(main._record_command)
+
+
+# ---------------------------------------------------------------------------
+# Silence endpointing + crash-safety + concurrency guard
+# ---------------------------------------------------------------------------
+
+class TestStopOnSilence:
+    def test_stops_early_after_speech_then_silence(self, mocker):
+        """Speech followed by ~1.2s of silence ends the recording early."""
+        sleeps = []
+
+        class FakeStream:
+            def __init__(self, **kw):
+                self._cb = kw["callback"]
+
+            def __enter__(self):
+                loud = np.ones((1600, 1), dtype="int16") * 3000
+                quiet = np.zeros((1600, 1), dtype="int16")
+                self._cb(loud, 1600, None, None)
+                for _ in range(12):          # 12 x 100ms = 1.2s silence
+                    self._cb(quiet, 1600, None, None)
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        mocker.patch("sounddevice.InputStream", FakeStream)
+        mocker.patch("sounddevice.sleep", side_effect=lambda ms: sleeps.append(ms))
+        from main import record_audio
+        result = record_audio(duration=10, sample_rate=16000,
+                              on_level=lambda _lvl: None, stop_on_silence=True)
+        assert result[:4] == b"RIFF"
+        # done was set before the wait loop ran, so no sleep-out to 10s
+        assert len(sleeps) <= 1
+
+    def test_without_speech_runs_to_max_duration(self, mocker):
+        class FakeStream:
+            def __init__(self, **kw):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        sleeps = []
+        mocker.patch("sounddevice.InputStream", FakeStream)
+        mocker.patch("sounddevice.sleep", side_effect=lambda ms: sleeps.append(ms))
+        from main import record_audio
+        record_audio(duration=2, sample_rate=16000,
+                     on_level=lambda _lvl: None, stop_on_silence=True)
+        assert sum(sleeps) == 2000           # waited out the full window
+
+
+class TestRecordCommandRobustness:
+    def test_agent_exception_recovers_hud(self, mocker):
+        """A crashing agent must leave the HUD in error → idle, not stuck."""
+        mocker.patch("main.record_audio", return_value=b"wav")
+        mocker.patch("time.sleep")
+        mocker.patch("actions.tts.speak")
+        from main import _record_command
+        hud = MagicMock()
+        stt = MagicMock()
+        stt.transcribe.return_value = "크롬 열어줘"
+        agent = MagicMock()
+        agent.run.side_effect = ConnectionError("refused")
+        _record_command(agent, hud, stt)
+        states = [c.args[0] for c in hud.set_state.call_args_list]
+        assert "error" in states
+        assert states[-1] == "idle"
+
+    def test_stt_exception_recovers_hud(self, mocker):
+        mocker.patch("main.record_audio", return_value=b"wav")
+        mocker.patch("time.sleep")
+        mocker.patch("actions.tts.speak")
+        from main import _record_command
+        hud = MagicMock()
+        stt = MagicMock()
+        stt.transcribe.side_effect = RuntimeError("stt broke")
+        _record_command(MagicMock(), hud, stt)
+        states = [c.args[0] for c in hud.set_state.call_args_list]
+        assert "error" in states
+        assert states[-1] == "idle"
+
+    def test_error_result_shows_error_state(self, mocker):
+        mocker.patch("main.record_audio", return_value=b"wav")
+        mocker.patch("time.sleep")
+        from main import _record_command
+        hud = MagicMock()
+        stt = MagicMock()
+        stt.transcribe.return_value = "사파리 열어줘"
+        agent = MagicMock()
+        agent.run.return_value = "오류: LLM 서버에 연결할 수 없어요."
+        _record_command(agent, hud, stt)
+        states = [c.args[0] for c in hud.set_state.call_args_list]
+        assert "error" in states and "success" not in states
+
+    def test_transcript_shown_and_cleared(self, mocker):
+        mocker.patch("main.record_audio", return_value=b"wav")
+        mocker.patch("time.sleep")
+        from main import _record_command
+        hud = MagicMock()
+        stt = MagicMock()
+        stt.transcribe.return_value = "크롬 열어줘"
+        agent = MagicMock()
+        agent.run.return_value = "완료"
+        _record_command(agent, hud, stt)
+        transcripts = [c.args[0] for c in hud.set_transcript.call_args_list]
+        assert transcripts[0] == "크롬 열어줘"
+        assert transcripts[-1] == ""
+
+    def test_concurrent_activation_defers_not_overlaps(self, mocker):
+        import main as main_mod
+        mocker.patch("main.record_audio", return_value=b"wav")
+        mocker.patch("time.sleep")
+        from main import _record_command
+        hud = MagicMock()
+        stt = MagicMock()
+        stt.transcribe.return_value = ""
+        main_mod._COMMAND_LOCK.acquire()     # simulate a command in flight
+        try:
+            _record_command(MagicMock(), hud, stt)
+            hud.set_state.assert_not_called()              # no overlapping session
+            assert main_mod._PENDING_ACTIVATION.is_set()   # but remembered
+        finally:
+            main_mod._COMMAND_LOCK.release()
+            main_mod._PENDING_ACTIVATION.clear()
+
+
+# ---------------------------------------------------------------------------
+# Continuous conversation mode (follow-up listening)
+# ---------------------------------------------------------------------------
+
+class TestContinuousMode:
+    def _hud_stt_agent(self, transcripts, agent_results):
+        hud = MagicMock()
+        stt = MagicMock()
+        stt.transcribe.side_effect = transcripts
+        agent = MagicMock()
+        agent.run.side_effect = agent_results
+        return hud, stt, agent
+
+    def test_follow_up_listens_again_after_success(self, mocker):
+        rec = mocker.patch("main.record_audio", return_value=b"wav")
+        mocker.patch("time.sleep")
+        from main import _record_command
+        hud, stt, agent = self._hud_stt_agent(["크롬 열어줘", "지메일 열어줘", ""],
+                                              ["완료", "완료"])
+        _record_command(agent, hud, stt, follow_up=True)
+        assert agent.run.call_count == 2
+        # follow-up rounds use the quick no-speech timeout
+        assert rec.call_args_list[0].kwargs["no_speech_timeout"] is None
+        assert rec.call_args_list[1].kwargs["no_speech_timeout"] == 5.0
+        states = [c.args[0] for c in hud.set_state.call_args_list]
+        assert states.count("listening") == 3      # 2 commands + final silent round
+        assert states[-1] == "idle"
+
+    def test_follow_up_stops_after_failure(self, mocker):
+        mocker.patch("main.record_audio", return_value=b"wav")
+        mocker.patch("time.sleep")
+        from main import _record_command
+        hud, stt, agent = self._hud_stt_agent(["없는앱 열어줘"], ["오류: 실패"])
+        _record_command(agent, hud, stt, follow_up=True)
+        assert agent.run.call_count == 1
+        states = [c.args[0] for c in hud.set_state.call_args_list]
+        assert "error" in states and states[-1] == "idle"
+
+    def test_no_follow_up_by_default(self, mocker):
+        mocker.patch("main.record_audio", return_value=b"wav")
+        mocker.patch("time.sleep")
+        from main import _record_command
+        hud, stt, agent = self._hud_stt_agent(["크롬 열어줘"], ["완료"])
+        _record_command(agent, hud, stt)
+        assert agent.run.call_count == 1
+
+
+class TestNoSpeechTimeout:
+    def test_silence_only_stops_at_timeout(self, mocker):
+        """Without any speech, no_speech_timeout ends the recording early."""
+        class FakeStream:
+            def __init__(self, **kw):
+                self._cb = kw["callback"]
+
+            def __enter__(self):
+                quiet = np.zeros((1600, 1), dtype="int16")
+                for _ in range(6):           # 0.6s of silence > 0.5s timeout
+                    self._cb(quiet, 1600, None, None)
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        sleeps = []
+        mocker.patch("sounddevice.InputStream", FakeStream)
+        mocker.patch("sounddevice.sleep", side_effect=lambda ms: sleeps.append(ms))
+        from main import record_audio
+        record_audio(duration=10, sample_rate=16000, on_level=lambda _l: None,
+                     stop_on_silence=True, no_speech_timeout=0.5)
+        assert len(sleeps) <= 1              # stopped early, not 10s worth
+
+
+class TestPendingActivation:
+    def test_activation_while_busy_sets_pending(self, mocker):
+        import main as main_mod
+        main_mod._PENDING_ACTIVATION.clear()
+        main_mod._COMMAND_LOCK.acquire()      # a command is in flight
+        try:
+            from main import _record_command
+            _record_command(MagicMock(), MagicMock(), MagicMock())
+            assert main_mod._PENDING_ACTIVATION.is_set()   # not silently dropped
+        finally:
+            main_mod._COMMAND_LOCK.release()
+            main_mod._PENDING_ACTIVATION.clear()
+
+    def test_pending_relistens_after_command_finishes(self, mocker):
+        import main as main_mod
+        mocker.patch("main.record_audio", return_value=b"wav")
+        mocker.patch("time.sleep")
+        spawned = {}
+
+        class FakeThread:
+            def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+                spawned["target"] = target
+                spawned["args"] = args
+
+            def start(self):
+                pass
+
+        mocker.patch.object(main_mod.threading, "Thread", FakeThread)
+        stt = MagicMock()
+        stt.transcribe.return_value = ""       # quick session
+        main_mod._PENDING_ACTIVATION.set()     # user spoke during the session
+        from main import _record_command
+        _record_command(MagicMock(), MagicMock(), stt)
+        assert spawned.get("target") is _record_command   # re-listen scheduled
+        assert not main_mod._PENDING_ACTIVATION.is_set()
+
+    def test_no_relisten_without_pending(self, mocker):
+        import main as main_mod
+        mocker.patch("main.record_audio", return_value=b"wav")
+        mocker.patch("time.sleep")
+        spawned = {}
+
+        class FakeThread:
+            def __init__(self, *a, **kw):
+                spawned["yes"] = True
+
+            def start(self):
+                pass
+
+        mocker.patch.object(main_mod.threading, "Thread", FakeThread)
+        stt = MagicMock()
+        stt.transcribe.return_value = ""
+        main_mod._PENDING_ACTIVATION.clear()
+        from main import _record_command
+        _record_command(MagicMock(), MagicMock(), stt)
+        assert "yes" not in spawned

@@ -1,4 +1,5 @@
 import sqlite3
+import os
 from datetime import datetime, timezone
 
 
@@ -20,6 +21,9 @@ CREATE TABLE IF NOT EXISTS events (
 class MetricsCollector:
     def __init__(self, db_path: str = "data/command_history.db"):
         self._db_path = db_path
+        parent = os.path.dirname(os.path.abspath(self._db_path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with self._conn() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute(_CREATE_TABLE)

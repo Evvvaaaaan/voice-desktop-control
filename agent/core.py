@@ -1,5 +1,5 @@
-import base64
 import json
+import re
 import time
 from llm.base import LLMBase
 from safety.guard import SafetyGuard
@@ -10,9 +10,32 @@ from agent.context import ConversationContext
 from agent import tools
 from actions.tts import speak
 from actions.applescript import run_applescript
-from actions.screen import take_screenshot
+from actions.screen import take_screenshot_with_grid
 
-MAX_ITERATIONS = 5
+# Computer-use tasks need room to screenshot → click → verify → correct.
+MAX_ITERATIONS = 8
+
+# Reasoning models (e.g. DeepSeek-style) prepend a chain-of-thought block
+# before the actual answer. Cap how many times we ask one to reformat as
+# JSON before giving up, so a model that never complies can't burn the
+# whole iteration budget on retries alone.
+MAX_JSON_RETRIES = 2
+
+_THINK_BLOCK_RE = re.compile(r'<think>.*?</think>', re.DOTALL)
+
+
+def _strip_think(raw: str) -> str:
+    """Strip a leading <think>...</think> reasoning block from an LLM response.
+
+    Some hosted reasoning models (observed with NVIDIA NIM's deepseek-v4-pro)
+    start the assistant turn already inside "thinking" mode via their chat
+    template, so the returned text has no opening <think> — only reasoning
+    prose followed by a stray closing </think>. Handle both shapes.
+    """
+    cleaned = _THINK_BLOCK_RE.sub("", raw)
+    if "</think>" in cleaned:
+        cleaned = cleaned.split("</think>", 1)[1]
+    return cleaned
 
 
 class Agent:
@@ -23,14 +46,46 @@ class Agent:
         collector: MetricsCollector,
         detector: RoutineDetector,
         tts_config,
+        on_state=None,
     ):
         self._llm = llm
         self._guard = guard
         self._collector = collector
         self._detector = detector
         self._tts = tts_config
+        self._on_state = on_state
         self._cache = HotCommandCache()
         self._context = ConversationContext()
+
+    def _set_state(self, state: str) -> None:
+        if self._on_state:
+            try:
+                self._on_state(state)
+            except Exception:
+                pass
+
+    def set_llm(self, llm: LLMBase) -> None:
+        self._llm = llm
+
+    def _observe(self, action: str, dispatch_res: str) -> dict:
+        """Build the post-action observation message fed back into the loop."""
+        try:
+            front = run_applescript(
+                'tell application "System Events" to get name of first process whose frontmost is true'
+            )
+        except Exception:
+            front = ""
+        text = (
+            f"관찰: 직전 동작 '{action}'의 결과는 '{dispatch_res}'입니다. "
+            f"현재 활성 앱: {front or '알 수 없음'}. "
+            "요청이 완전히 끝났으면 done=true로, 아니면 다음 단계를 수행하세요."
+        )
+        if getattr(self._llm, "supports_vision", False) is True:
+            try:
+                return self._llm.build_observation(text, take_screenshot_with_grid())
+            except Exception:
+                pass
+        return {"role": "user", "content": text}
 
     def run(self, command: str) -> str:
         start = time.monotonic()
@@ -38,88 +93,174 @@ class Agent:
 
         cached = self._cache.get(command)
         if cached:
+            import sys
+            print(f"[Agent] Cache HIT for command '{command}': {cached}", file=sys.stderr)
             action_str, params_str = cached.split(":", 1) if ":" in cached else (cached, "{}")
             try:
                 params_dict = json.loads(params_str)
             except (json.JSONDecodeError, ValueError):
                 params_dict = {}
             if action_str == "launch_app":
-                import re
-                _SAFE = re.compile(r'^[A-Za-z0-9 ._-]+$')
-                app = params_dict.get("app", params_str)
+                _SAFE = re.compile(r'^[A-Za-z0-9가-힣 ._-]+$')
+                app = params_dict.get("app", params_dict.get("app_name", params_dict.get("name", params_str)))
                 if not _SAFE.match(str(app)):
+                    print(f"[Agent] Cached launch_app blocked: Invalid app name '{app}'", file=sys.stderr)
                     return f"error: invalid app name: {app}"
+                print(f"[Agent] Executing cached launch_app for '{app}'...", file=sys.stderr)
                 result = run_applescript(f'tell application "{app}" to activate')
             else:
+                print(f"[Agent] Executing cached action '{action_str}' with {params_dict}...", file=sys.stderr)
                 result = tools.dispatch(action_str, params_dict)
             elapsed_ms = int((time.monotonic() - start) * 1000)
-            speak("완료했습니다.", self._tts.voice, self._tts.rate)
-            self._collector.record(command, 0.99, True, 0, False, elapsed_ms, False)
+            failed = isinstance(result, str) and result.startswith("error")
+            self._set_state("error" if failed else "success")
+            if failed:
+                speak("저장된 명령 실행에 실패했어요.", self._tts.voice, self._tts.rate, tts_config=self._tts)
+            else:
+                speak("완료했습니다.", self._tts.voice, self._tts.rate, tts_config=self._tts)
+            self._collector.record(command, 0.99, not failed, 0, False, elapsed_ms, False)
+            print(f"[Agent] Cache execution finished. Result: {result}", file=sys.stderr)
             return result
 
         final_response = ""
         action = "none"
         params: dict = {}
-        pending_vision: dict | None = None
+        last_dispatch = ""
+        json_retries = 0
+        # Maintain one running message list so each step remembers the original
+        # command and the assistant's prior actions/observations.
+        messages = self._context.to_messages(command)
         for i in range(MAX_ITERATIONS):
-            messages = self._context.to_messages(command if i == 0 else None)
-            if pending_vision:
-                messages.append(pending_vision)
-                pending_vision = None
-            raw = self._llm.complete(messages)
-
             try:
-                parsed = json.loads(raw)
-            except json.JSONDecodeError:
-                final_response = raw
+                raw = self._llm.complete(messages)
+            except Exception as e:
+                import sys
+                print(f"[Agent] LLM call FAILED: {type(e).__name__}: {e}", file=sys.stderr)
+                if "Connection" in type(e).__name__ or "Connection" in str(e):
+                    final_response = "오류: LLM 서버에 연결할 수 없어요. 설정에서 LLM 상태를 확인해 주세요."
+                else:
+                    final_response = "오류: 명령을 처리하지 못했어요. LLM 설정을 확인해 주세요."
                 break
+
+            # Clean up markdown code blocks or leading/trailing text from LLM response
+            import sys
+            raw_clean = _strip_think(raw).strip()
+            print(f"[Agent] Raw response received from LLM:\n{raw}\n-----------------", file=sys.stderr)
+            if raw_clean.startswith("```"):
+                lines = raw_clean.split("\n")
+                if len(lines) >= 2 and lines[0].startswith("```"):
+                    if lines[-1].strip() == "```":
+                        raw_clean = "\n".join(lines[1:-1])
+                    else:
+                        raw_clean = "\n".join(lines[1:])
+            # Extract JSON brackets if LLM added explanations outside the JSON
+            json_match = re.search(r'\{.*\}', raw_clean, re.DOTALL)
+            if json_match:
+                raw_clean = json_match.group(0)
+
+            print(f"[Agent] Cleaned response for JSON parsing:\n{raw_clean}\n-----------------", file=sys.stderr)
+            try:
+                parsed = json.loads(raw_clean)
+            except json.JSONDecodeError as e:
+                print(f"[Agent] JSON parsing FAILED. Error: {e}", file=sys.stderr)
+                print(f"[Agent] Raw output was: {raw}", file=sys.stderr)
+                if json_retries < MAX_JSON_RETRIES and i < MAX_ITERATIONS - 1:
+                    json_retries += 1
+                    print(f"[Agent] Asking model to reformat as JSON (retry {json_retries}/{MAX_JSON_RETRIES})...", file=sys.stderr)
+                    messages.append({"role": "assistant", "content": raw})
+                    messages.append({
+                        "role": "user",
+                        "content": "방금 응답은 유효한 JSON이 아니었어요. 다른 설명 없이 지정된 형식의 JSON 객체 하나만 응답하세요.",
+                    })
+                    continue
+                # The model never produced usable JSON — speaking the raw text
+                # would read reasoning/prose (and stray tags) aloud, so use the
+                # same honest fallback as an exhausted iteration budget instead.
+                final_response = "오류: 응답 형식을 이해하지 못했어요. 다시 말씀해 주세요."
+                break
+
+            # Remember what the assistant just decided so later steps have context.
+            messages.append({"role": "assistant", "content": raw})
 
             action = parsed.get("action", "speak_only")
             params = parsed.get("params", {})
             done = parsed.get("done", False)
             response_text = parsed.get("response", "")
+            print(f"[Agent] Parsed: Action='{action}', Params={params}, Done={done}, Response='{response_text}'", file=sys.stderr)
+
+            dangerous = self._guard.is_dangerous(action, params)
+            if dangerous:
+                print(f"[Agent] Action flagged as DANGEROUS: {action}", file=sys.stderr)
+                self._set_state("danger_confirm")
+                retry += 1
 
             if not self._guard.check(action, params):
-                speak("작업을 취소했습니다.", self._tts.voice, self._tts.rate)
+                print(f"[Agent] Action BLOCKED by Safety Guard: {action} with {params}", file=sys.stderr)
+                speak("작업을 취소했습니다.", self._tts.voice, self._tts.rate, tts_config=self._tts)
                 final_response = "취소됨"
-                retry += 1
                 break
 
-            if self._guard.is_dangerous(action, params):
-                retry += 1
+            if dangerous:
+                self._set_state("executing")
 
-            tools.dispatch(action, params)
-            self._cache.record(command, f"{action}:{json.dumps(params)}")
+            print(f"[Agent] Dispatching action '{action}' with {params}...", file=sys.stderr)
+            dispatch_res = tools.dispatch(action, params)
+            last_dispatch = dispatch_res
+            print(f"[Agent] Dispatch result: '{dispatch_res}'", file=sys.stderr)
 
             if done:
-                final_response = response_text
-                break
+                if dispatch_res.startswith("error"):
+                    # Harness gate (verify before done): an action that just
+                    # failed cannot claim completion. Reject done=true and fall
+                    # through to the observation so the model can correct
+                    # itself or report the failure honestly.
+                    print(f"[Agent] done=true REJECTED: last action failed ('{dispatch_res}')", file=sys.stderr)
+                else:
+                    # Only single-step, real actions are safe to cache: a
+                    # multi-step command can't be replayed from one action and
+                    # a speak_only reply would lose its answer on replay.
+                    if i == 0 and action != "speak_only":
+                        self._cache.record(command, f"{action}:{json.dumps(params)}")
+                    final_response = response_text
+                    break
 
-            # Vision-verify: feed screenshot back so LLM can confirm success
+            # Feed an observation of the current state back so the LLM can
+            # verify success and continue. Vision-capable providers get a
+            # screenshot; others get a text-only observation.
             if action != "speak_only" and i < MAX_ITERATIONS - 1:
-                try:
-                    img_b64 = base64.b64encode(take_screenshot()).decode()
-                    pending_vision = {
-                        "role": "user",
-                        "content": [
-                            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_b64}},
-                            {"type": "text", "text": "화면 상태입니다. 작업이 완료됐는지 확인하고 계속하세요."},
-                        ],
-                    }
-                except Exception:
-                    pass
+                messages.append(self._observe(action, dispatch_res))
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
-        success = bool(final_response and final_response != "취소됨")
+        success = bool(
+            final_response
+            and final_response != "취소됨"
+            and not final_response.startswith("오류")
+            and not last_dispatch.startswith("error")
+        )
+        # The loop ran out of steps before the model set done=true (a long or
+        # under-specified command). Without this the user would hear silence,
+        # which reads as "no response". Give spoken feedback instead.
+        if not final_response:
+            final_response = "오류: 명령을 끝까지 완료하지 못했어요. 좀 더 구체적으로 다시 말씀해 주세요."
+            print("[Agent] Loop ended without a final response; using fallback.", file=sys.stderr)
+
         is_repeated = self._detector.record(command)
         self._context.add_turn(command, final_response)
         self._collector.record(command, 0.95, success, retry,
                                self._guard.is_dangerous(action, params),
                                elapsed_ms, is_repeated)
 
+        # speak() blocks until the audio finishes playing (can be several
+        # seconds for a long response, longer still when NVIDIA TTS fails and
+        # falls back to local voice). Tell the HUD the outcome BEFORE that
+        # call so it shows success/error immediately instead of sitting on
+        # "명령 수행 중..." for the entire time the response is being read
+        # aloud — otherwise a long spoken reply looks exactly like a hang.
+        self._set_state("success" if success else "error")
+
         if final_response:
-            speak(final_response, self._tts.voice, self._tts.rate)
+            speak(final_response, self._tts.voice, self._tts.rate, tts_config=self._tts)
         if is_repeated:
-            speak("이 명령을 루틴으로 저장할까요?", self._tts.voice, self._tts.rate)
+            speak("이 명령을 루틴으로 저장할까요?", self._tts.voice, self._tts.rate, tts_config=self._tts)
 
         return final_response

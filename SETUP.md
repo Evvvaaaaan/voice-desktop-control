@@ -1,182 +1,269 @@
-# VoiceDesk — 설치 및 실행 가이드
+# VoiceDesk — 실행 가이드
 
-## 시스템 요구사항
-
-| 항목 | 최소 사양 |
-|---|---|
-| macOS | 12 Monterey 이상 |
-| CPU | Apple Silicon (M1+) 또는 Intel |
-| Python | 3.12 이상 |
-| 여유 용량 | 최소 2GB (로컬 AI 모델 사용 시 추가 필요) |
+한국어 음성으로 macOS를 제어하는 데스크톱 에이전트입니다. 이 문서는 설치부터 실제 사용까지
+필요한 모든 단계를 순서대로 안내합니다.
 
 ---
 
-## 1. 설치
+## 목차
 
+1. [시스템 요구사항](#1-시스템-요구사항)
+2. [설치](#2-설치)
+3. [macOS 권한 설정 (필수 4가지)](#3-macos-권한-설정-필수-4가지)
+4. [AI 프로바이더 설정](#4-ai-프로바이더-설정)
+5. [실행](#5-실행)
+6. [사용 방법](#6-사용-방법)
+7. [노치 UI 안내](#7-노치-ui-안내)
+8. [Settings 창](#8-settings-창)
+9. [.app 번들로 배포](#9-app-번들로-배포)
+10. [트러블슈팅](#10-트러블슈팅)
+
+---
+
+## 1. 시스템 요구사항
+
+| 항목 | 최소 사양 | 비고 |
+|---|---|---|
+| macOS | 13 Ventura 이상 | 손쉬운 사용 API·노치 감지에 필요 |
+| CPU | Apple Silicon (M1+) 권장 | Intel도 동작하나 Whisper 로컬 STT가 느림 |
+| Python | 3.12 이상 | |
+| Xcode Command Line Tools | 필요 | 노치 UI가 Swift로 구현되어 `swiftc`로 최초 실행 시 자동 컴파일됨 |
+| 여유 용량 | 최소 2GB | Whisper 로컬 모델(수백 MB) 포함 |
+
+**Xcode Command Line Tools 설치 확인:**
 ```bash
-git clone https://github.com/your-org/voicedesk.git
-cd voicedesk
-pip3 install -r requirements.txt
+xcode-select -p || xcode-select --install
 ```
 
 ---
 
-## 2. macOS 권한 설정 (필수)
+## 2. 설치
 
-앱을 처음 실행하기 전에 아래 권한 3가지를 허용해야 합니다.
+```bash
+cd /Users/evan/voicedesk
+pip3 install -r requirements.txt
+```
 
-### 마이크 접근
-`시스템 설정 → 개인정보 보호 및 보안 → 마이크 → Terminal (또는 VoiceDesk.app) 허용`
-
-### 손쉬운 사용 (Accessibility)
-`시스템 설정 → 개인정보 보호 및 보안 → 손쉬운 사용 → Terminal (또는 VoiceDesk.app) 허용`
-
-> 이 권한이 없으면 마우스/키보드 제어, 앱 버튼 클릭 등이 동작하지 않습니다.
-
-### 화면 녹화
-`시스템 설정 → 개인정보 보호 및 보안 → 화면 및 시스템 오디오 녹화 → Terminal (또는 VoiceDesk.app) 허용`
-
-> 화면 캡처 기반 검증 기능에 필요합니다.
+첫 설치 확인:
+```bash
+python3 -c "import riva.client, sounddevice, openwakeword; print('OK')"
+```
 
 ---
 
-## 3. LLM / STT 설정
+## 3. macOS 권한 설정 (필수 4가지)
 
-`config.yaml`을 열어 사용할 프로바이더를 선택합니다.
+**터미널에서 `python3 main.py`로 직접 실행한다면, 아래 권한은 Python이 아니라 "Terminal" 앱 기준으로
+허용해야 합니다.** `.app`으로 빌드해 실행한다면 "VoiceDesk"로 허용하세요.
 
-### 옵션 A — 완전 무료 (로컬)
+설정 창의 **Permissions 탭**에서 각 권한의 현재 상태(✅/❌)를 확인하고, 버튼 클릭으로 바로
+해당 시스템 설정 화면을 열 수 있습니다(앱으로 돌아오면 자동 새로고침).
+
+| 권한 | 위치 | 필요한 이유 |
+|---|---|---|
+| **마이크** | 개인정보 보호 및 보안 → 마이크 | 음성 명령 녹음 |
+| **손쉬운 사용 (Accessibility)** | 개인정보 보호 및 보안 → 손쉬운 사용 | 마우스 이동/클릭, 키보드 입력(컴퓨터 유즈) |
+| **화면 및 시스템 오디오 녹화** | 개인정보 보호 및 보안 → 화면 및 시스템 오디오 녹화 | 화면 캡처 후 비전 LLM에게 보여주기 |
+| **자동화 (Automation)** | 첫 사용 시 팝업으로 요청됨 | 앱 실행/제어(AppleScript), 재생 중 음악 정보 조회 |
+
+> ⚠️ 손쉬운 사용 권한이 없으면 클릭/타이핑/화면-보고-클릭(컴퓨터 유즈)이 전부 무동작합니다.
+> 목록에 앱이 없거나 토글이 꺼져 있으면 반드시 켜세요 — 앱이 등록만 되고 꺼진 상태로 남아있는
+> 경우가 흔합니다.
+
+---
+
+## 4. AI 프로바이더 설정
+
+설정 파일 위치: `~/Library/Application Support/VoiceDesk/config.yaml` (최초 실행 시 자동 생성).
+앱 실행 후 메뉴바 → **Open Settings**에서 GUI로 편집하는 것을 권장합니다.
+
+### STT (음성 인식) — 권장: `whisper_local` / `small`
 
 ```yaml
 stt:
   provider: whisper_local
-  whisper_local_model: base   # tiny / base / small / medium 중 선택
-
-llm:
-  provider: ollama
-  ollama_url: http://localhost:11434
-  ollama_model: llama3
+  whisper_local_model: small   # tiny/base/small/medium — small 권장 (정확도·속도 균형)
 ```
 
-**Ollama 설치:**
-```bash
-brew install ollama
-ollama pull llama3   # 약 4GB 다운로드
-ollama serve         # 백그라운드 실행
-```
+macOS 무료 STT(`macos`, Google 웹 API 경유)보다 한국어 인식률이 높고 완전 오프라인입니다.
+첫 실행 시 모델을 자동 다운로드합니다(small ≈ 460MB).
 
-**faster-whisper 모델 다운로드:**
-첫 실행 시 자동으로 다운로드됩니다 (base 모델 약 140MB).
-
----
-
-### 옵션 B — Claude API 사용 (권장)
+### LLM (두뇌) — 권장: NVIDIA `deepseek-ai/deepseek-v4-pro`
 
 ```yaml
-stt:
-  provider: whisper_local   # STT는 로컬로 무료 유지
-
 llm:
-  provider: claude
-  claude_api_key: sk-ant-...   # Anthropic Console에서 발급
-  claude_model: claude-sonnet-4-6
+  provider: nvidia
+  nvidia_api_key: nvapi-...
+  nvidia_model: deepseek-ai/deepseek-v4-pro
 ```
 
-**API 키 발급:** https://console.anthropic.com → API Keys
+- **API 키 발급**: https://build.nvidia.com → 아무 모델 페이지 → **Get API Key** (신용카드 불필요, 무료)
+- 이 모델은 **비전(이미지 이해)을 지원**하여 컴퓨터 유즈(화면 보고 클릭)가 동작합니다. NVIDIA
+  모델 중 비전 미지원 모델(예: `minimaxai/minimax-m3`)로 바꾸면 화면을 보는 동작은 자동으로
+  비활성화됩니다(멈춤 방지를 위해 코드가 모델별로 판단).
+- 무료 티어는 가끔 응답이 느리거나 일시적으로 불가할 수 있습니다 — 요청은 30초 타임아웃 +
+  재시도 1회로 제한되어 있어, 실패해도 음성으로 오류를 안내하고 최대 약 1분 내에 끝납니다.
 
-**예상 비용:** 하루 30회 사용 기준 약 $7/월 (Hot Command Cache 절감 포함)
+**대안:**
+| 프로바이더 | 장점 | 설정 |
+|---|---|---|
+| Claude | 가장 안정적, 비전 지원 | `provider: claude`, `claude_api_key` (console.anthropic.com) |
+| OpenAI GPT-4o | 비전 지원 | `provider: openai`, `openai_api_key` |
+| Ollama (로컬) | 완전 무료·오프라인 | `provider: ollama` — `brew install ollama && ollama pull llama3 && ollama serve` 먼저 실행 |
 
----
-
-### 옵션 C — OpenAI GPT-4o 사용
+### TTS (음성 합성) — 선택: NVIDIA Chatterbox 또는 macOS 기본
 
 ```yaml
-stt:
-  provider: whisper_api
-  whisper_api_key: sk-...   # OpenAI API 키
-
-llm:
-  provider: openai
-  openai_api_key: sk-...
-  openai_model: gpt-4o
+tts:
+  provider: nvidia
+  nvidia_api_key: nvapi-...
+  nvidia_function_id: ...
+  nvidia_voice: Chatterbox-Multilingual.ko-KR.Male
+  nvidia_language_code: ko-KR
 ```
+
+- Function ID는 https://build.nvidia.com/resembleai/chatterbox-multilingual-tts 의 **Deploy** 탭에서
+  계정별로 확인합니다(공유 불가, 계정마다 다름).
+- 실패 시 자동으로 macOS 로컬 음성(`say`)으로 폴백되므로 무음이 되지는 않습니다.
+- `provider: macos`로 두면 완전 무료·오프라인(기본 음성 `Yuna`).
+
+### 변경 반영 시점
+
+| 항목 | 반영 시점 |
+|---|---|
+| STT, TTS | 저장 즉시 (재시작 불필요) |
+| LLM 프로바이더/모델/키 | 저장 즉시 — 메뉴바에서 **Toggle Listening** 없이도 다음 명령부터 새 설정 사용 |
+| 활성화 방식(웨이크워드/단축키), 안전 확인, HUD 위젯 | 다음 저장 시 즉시 반영 |
 
 ---
 
-## 4. 실행
+## 5. 실행
 
 ```bash
+cd /Users/evan/voicedesk
 python3 main.py
 ```
 
-메뉴 바에 VoiceDesk 아이콘이 나타나면 준비 완료입니다.
+메뉴바에 VoiceDesk 아이콘이 뜨고, 화면 상단 노치(또는 노치 없는 화면은 화면 최상단 중앙)에
+검은 알약 모양 HUD가 나타나면 준비 완료입니다.
+
+> 최초 실행 시 노치 UI(Swift)가 `swiftc`로 자동 컴파일됩니다(수 초 소요, 이후는 캐시 재사용).
+> 콘솔에 `[HUD] Swift HUD compile failed`가 뜨면 [트러블슈팅](#10-트러블슈팅) 참고.
 
 ---
 
-## 5. 사용 방법
+## 6. 사용 방법
 
-### 음성 명령 시작
+### 명령 시작하기 (3가지 방법)
 
-| 방법 | 동작 |
+| 방법 | 사용법 |
 |---|---|
-| **⌥Space** (Option + Space) | 5초 녹음 후 명령 실행 |
-| **"Hey Desk"** (웨이크 워드) | 자동 인식 후 명령 실행 |
+| **"Hey Jarvis"** | 영어 발음으로 부르기 — 전용 웨이크워드 모델이라 가장 안정적 |
+| **"Hey Desk"** | 영어 발음 또는 "헤이 데스크" 한국어 발음 모두 인식 |
+| **Option + Space** | 키보드 단축키, 가장 확실함 |
 
-> 활성화 방법은 Settings → General에서 변경 가능
+노치가 파란 막대(듣는 중) 상태가 되면 명령을 말합니다. 말이 끝나고 약 1.2초 후 자동으로 인식이
+시작됩니다(최대 10초 녹음).
+
+### 연속 대화 모드
+
+명령이 성공하면 **웨이크워드 없이 자동으로 다시 듣기**를 시작합니다. 5초간 말이 없으면 조용히
+대기 상태로 돌아갑니다. 끄려면 `config.yaml`에서 `activation.continuous: false`.
+
+이전 명령이 아직 실행 중일 때 새로 부르면 명령이 버려지지 않고, **현재 명령이 끝나자마자
+자동으로 다시 듣기**를 시작합니다 — 연달아 여러 명령을 말해도 마지막 것이 유실되지 않습니다.
 
 ### 명령 예시
 
 ```
 "사파리 열어줘"
-"볼륨 줄여줘"
+"크롬 열고 지메일 검색해줘"        (다단계 명령)
 "화면 캡처해줘"
-"메일 앱에서 새 메일 작성해줘"
-"지금 열려있는 창 닫아줘"
-"Spotify에서 다음 곡 틀어줘"
+"이 버튼 눌러줘"                   (컴퓨터 유즈 — 화면을 보고 실제로 클릭)
+"오늘 날씨 알려줘"                 (speak_only — 실행 없이 대답만)
 ```
+
+### 컴퓨터 유즈 (화면 보고 클릭)
+
+앱 실행/URL 열기 같은 명령형 동작 외에, **화면 안의 요소를 직접 클릭**해야 하는 명령은 비전
+LLM이 스크린샷을 보고 좌표를 지정하면 실제 마우스 커서가 그 위치로 부드럽게 이동해 클릭합니다.
+- 필요 조건: 손쉬운 사용 권한(§3) + 비전 지원 LLM(§4)
+- **다중 모니터 지원**: 현재 활성 앱이 떠 있는 화면을 자동으로 인식해 그 화면을 캡처·클릭합니다
+  (메인 화면이 아니어도 정상 동작).
+
+### 긴 텍스트 입력 (10자 이상)
+
+메일 본문처럼 긴 텍스트를 입력해야 하는 명령은, 음성 인식 정확도가 떨어지는 것을 방지하기 위해
+**노치에 텍스트 입력창**이 열립니다. LLM이 만든 초안이 미리 채워져 있으니 검토·수정 후 **Enter**로
+확정하거나 **취소**를 누르면 됩니다. 확정하면 원래 작업하던 앱으로 자동 포커스가 돌아가 입력됩니다.
 
 ### 위험 명령 확인
 
-삭제, 이메일 발송, 구매 등 위험한 작업은 실행 전 음성으로 확인을 요청합니다:
-> "위험한 작업입니다. 진행할까요? 네 또는 아니오로 말씀해주세요."
+삭제, 이메일 발송, 결제 등 위험한 작업은 실행 전 확인을 요청합니다. **음성("네"/"아니오") 또는
+노치의 [실행]/[취소] 버튼** 중 먼저 응답한 쪽이 적용됩니다. 10초간 무응답이면 자동으로 취소됩니다.
 
 ---
 
-## 6. Settings UI 열기
+## 7. 노치 UI 안내
 
-메뉴 바 아이콘 클릭 → **Open Settings**
+NotchNook 스타일의 검은 알약 UI입니다.
+
+- **평상시(idle)**: 물리 노치 크기에 맞춘 얇은 검은 알약
+- **마우스 올리면(hover, 0.25초 유지)**: STT/LLM/TTS 프로바이더 한 줄 요약이 펼쳐짐
+- **클릭(고정)**: 더 큰 패널로 확장 — 좌측에 재생 중인 음악(Music/Spotify, 재생 중이면
+  이퀄라이저 애니메이션), 우측에 시계, 하단에 프로바이더 3열 상세 정보와 배터리 잔량. 다시
+  클릭하면 접힙니다. 설정 → General에서 시계/음악 위젯 각각 켜고 끌 수 있습니다.
+- **명령 처리 중**: 상태별 색상(듣는 중=파랑, 생각 중/실행 중=주황·초록 + 회전 스피너, 성공=
+  에메랄드, 오류=빨강)과 인식된 명령 텍스트가 표시되어 대기 중에도 진행 상황을 알 수 있습니다.
+- **사운드**: 패널 고정/성공/오류/듣기 시작 시 짧고 은은한 시스템 사운드(볼륨 30%)
+
+---
+
+## 8. Settings 창
+
+메뉴바 아이콘 클릭 → **Open Settings**
 
 | 페이지 | 설정 내용 |
 |---|---|
-| General | 웨이크 워드, 단축키, TTS 음성 |
-| STT | 음성 인식 프로바이더 및 API 키 |
-| LLM | AI 모델 프로바이더, API 키, 모델 선택 |
-| Routines | 저장된 루틴 관리 |
-| Metrics | 6개 KPI 대시보드 |
+| General | 웨이크 워드, 단축키, 연속 대화 모드, 안전 확인, 노치 위젯(시계/음악) 켜기/끄기 |
+| STT | 음성 인식 프로바이더 및 모델 |
+| LLM | AI 모델 프로바이더·API 키·모델 선택 |
+| TTS | 음성 합성 프로바이더, 음성, 속도 |
+| Routines | 3회 이상 반복된 명령을 루틴으로 저장·관리 |
+| Metrics | 인식률·성공률·평균 응답시간 등 KPI 대시보드 |
+| Permissions | 마이크·손쉬운 사용·화면 녹화 권한 상태 확인 및 바로가기 |
 | About | 버전 정보 |
-
-> **STT** 변경 후 Save하면 재시작 없이 즉시 적용됩니다.
-> **LLM** 프로바이더 또는 API 키 변경 시에는 앱을 **재시작**해야 적용됩니다.
 
 ---
 
-## 7. .app 번들로 실행 (선택)
-
-개발이 완료된 후 배포용 앱으로 빌드할 수 있습니다:
+## 9. .app 번들로 배포
 
 ```bash
-python setup.py py2app
+python3 setup.py py2app
 open dist/VoiceDesk.app
 ```
 
+`.app`으로 실행하면 위 §3의 모든 권한을 **"VoiceDesk"** 이름으로 다시 허용해야 합니다
+(Terminal에서 허용했던 권한과 별개).
+
 ---
 
-## 트러블슈팅
+## 10. 트러블슈팅
 
-| 증상 | 해결 방법 |
+| 증상 | 원인 / 해결 |
 |---|---|
-| 음성이 인식되지 않음 | 마이크 권한 확인 (항목 2) |
-| "클릭" 동작이 안 됨 | 손쉬운 사용(Accessibility) 권한 확인 |
+| 음성이 인식되지 않음 | 마이크 권한(§3) 확인. 콘솔에 `Microphone input is SILENT (0)` 뜨면 동일 |
+| 클릭/타이핑이 전혀 안 됨 | 손쉬운 사용 권한이 꺼져 있음 — 목록에 있어도 토글이 OFF인 경우가 흔함 |
+| 커서가 엉뚱한 화면에서 움직이거나 안 움직임 | 외부 모니터 사용 시, 활성 앱이 있는 화면을 자동 인식하도록 되어 있음 — 스크린샷 대상 앱을 최상단으로 포커스한 뒤 명령하세요 |
+| 명령이 끝까지 완료 안 됨(오류 음성) | 8단계 안에 끝나지 않은 명령 — 더 구체적으로 다시 말하거나 단계를 나눠 요청 |
+| "메일 써줘"가 수신자를 못 채움 | 에이전트가 사용자 본인 이메일 주소를 모름 — "내 이메일은 xxx@yyy.com이고 ..."처럼 직접 포함해 말하기 |
+| LLM 무응답/타임아웃 | NVIDIA 무료 티어 일시 장애 가능 — 최대 약 1분 후 오류 음성 안내됨. 지속되면 Claude/OpenAI로 전환 |
+| NVIDIA LLM 401/403 | `nvidia_api_key` 확인, build.nvidia.com에서 재발급 |
 | Ollama 연결 실패 | `ollama serve` 실행 여부 확인 |
-| Claude API 오류 | `claude_api_key` 값 확인 |
-| faster-whisper 느림 | `whisper_local_model: tiny`로 변경 |
-| 화면 캡처 안 됨 | 화면 녹화 권한 확인 (항목 2) |
+| Whisper 로컬 STT 느림 | `whisper_local_model: tiny` 또는 `base`로 낮추기 |
+| 화면 캡처 안 됨 | 화면 및 시스템 오디오 녹화 권한(§3) 확인 |
+| NVIDIA TTS가 계속 로컬 음성으로만 나옴 | `nvidia_function_id`가 틀렸거나 네트워크 문제 — 자동 폴백 중, Function ID 재확인 |
+| "Hey Jarvis"가 인식 안 됨 | 최초 실행 시 모델 자동 다운로드에 인터넷 필요 — 콘솔 다운로드 로그 확인 |
+| 노치 UI가 안 뜸 / `Swift HUD compile failed` | Xcode Command Line Tools 미설치 — `xcode-select --install` 후 재실행 |
+| 재생 중 음악이 위젯에 안 뜸 | Music/Spotify가 실행 중이어야 조회함(자동 실행 안 함) + 첫 조회 시 자동화 권한 팝업을 허용해야 함 |
+| 위험 확인이 응답 없이 자동 취소됨 | 10초 타임아웃 — 음성 "네"/"아니오" 또는 노치의 [실행]/[취소] 버튼으로 빠르게 응답 |

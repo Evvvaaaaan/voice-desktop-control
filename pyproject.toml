@@ -6,10 +6,45 @@ build-backend = "setuptools.build_meta"
 name = "voicedesk"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "anthropic>=0.40.0",
+    "openai>=1.50.0",
+    "SpeechRecognition>=3.10.0",
+    "pyautogui>=0.9.54",
+    "pynput>=1.7.6",
+    "openwakeword>=0.6.0",
+    "faster-whisper>=1.0.0",
+    "sounddevice>=0.4.6",
+    "numpy>=1.26.0",
+    "pillow>=10.0.0",
+    "rumps>=0.4.0",
+    "pyobjc-core>=10.0",
+    "pyobjc-framework-Cocoa>=10.0",
+    "pyobjc-framework-Quartz>=10.0",
+    "pyobjc-framework-AVFoundation>=10.0",
+    "pyyaml>=6.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-mock>=3.12.0",
+    "py2app>=0.28.0",
+]
+
+[tool.setuptools]
+py-modules = ["main"]
+include-package-data = false
 
 [tool.setuptools.packages.find]
 where = ["."]
+exclude = ["tests*", "build*", "dist*", "data*"]
+
+[tool.setuptools.package-data]
+"ui.swift_hud" = ["VoiceDeskHUD.swift"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["__pycache__/*", "*.py[cod]"]
 
 [project.scripts]
 voicedesk = "main:main"
@@ -20,6 +55,10 @@ argv_emulation = false
 packages = [
     "anthropic", "openai", "pyautogui", "pynput",
     "faster_whisper", "sounddevice", "numpy", "PIL",
-    "rumps", "pyobjc", "AppKit", "Quartz", "yaml", "matplotlib",
+    "rumps", "objc", "AppKit", "Quartz", "AVFoundation", "yaml",
     "openwakeword",
+]
+excludes = [
+    "matplotlib", "tkinter", "tests", "pytest",
+    "rubicon", "mouseinfo", "pygetwindow",
 ]

@@ -1,10 +1,14 @@
 import sqlite3
+import os
 
 
 class RoutineDetector:
     def __init__(self, db_path: str, threshold: int = 3):
         self._db = db_path
         self._threshold = threshold
+        parent = os.path.dirname(os.path.abspath(self._db))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with sqlite3.connect(self._db) as c:
             c.execute(
                 "CREATE TABLE IF NOT EXISTS cmd_freq "

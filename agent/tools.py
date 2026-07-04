@@ -1,9 +1,52 @@
 import re
+import os
 from actions.applescript import run_applescript
-from actions.mouse_keyboard import click, type_text, press_key, scroll
-from actions.screen import take_screenshot
+from actions.mouse_keyboard import (
+    click, double_click, move_mouse, type_text, press_key, scroll,
+)
+from actions.screen import take_screenshot_with_grid, active_screen_rect
 
-_SAFE_APP_NAME = re.compile(r'^[A-Za-z0-9 ._-]+$')
+_SAFE_APP_NAME = re.compile(r'^[A-Za-z0-9가-힣 ._-]+$')
+# Only http(s) URLs, and no characters that could break out of the quoted
+# AppleScript string ("  '  \  <  >  and whitespace).
+_SAFE_URL = re.compile(r'^https?://[^\s"\'\\<>]+$')
+
+# The vision model reports pointer targets in a resolution-independent
+# 0..1000 grid (top-left origin) so its coordinates survive screenshot
+# downscaling; we map that grid onto the display's logical points here.
+_COORD_SCALE = 1000.0
+
+# Long text is unreliable when dictated: anything this long is routed to the
+# notch text field (prefilled with the LLM's draft) for the user to confirm
+# or fix with the keyboard before it is typed.
+_TEXT_INPUT_MIN_CHARS = 10
+_TEXT_INPUT_PROVIDER = None   # hud.request_text_input, wired by main()
+
+
+def set_text_input_provider(provider) -> None:
+    global _TEXT_INPUT_PROVIDER
+    _TEXT_INPUT_PROVIDER = provider
+
+
+def _to_logical(params):
+    """Map normalized (0..1000) x/y to global screen points on the ACTIVE
+    display — the one the screenshot was taken of. Global coordinates may be
+    negative on multi-display setups (screens left of / above the main one).
+    Clamped just inside that display so a stray corner value never trips
+    pyautogui's failsafe. Returns (x, y) or None if a coordinate is missing."""
+    raw_x, raw_y = params.get("x"), params.get("y")
+    if raw_x is None or raw_y is None:
+        return None
+    try:
+        nx, ny = float(raw_x), float(raw_y)
+    except (TypeError, ValueError):
+        return None
+    rx, ry, rw, rh = active_screen_rect()
+    x = rx + nx / _COORD_SCALE * rw
+    y = ry + ny / _COORD_SCALE * rh
+    x = max(rx + 1, min(rx + rw - 2, x))
+    y = max(ry + 1, min(ry + rh - 2, y))
+    return int(x), int(y)
 
 
 class _DispatchExecutor:
@@ -13,32 +56,74 @@ class _DispatchExecutor:
 
 def dispatch(action: str, params: dict) -> str:
     if action == "launch_app":
-        app = params.get("app", "")
+        app = str(params.get("app", params.get("app_name", params.get("name", ""))) or "")
         if not _SAFE_APP_NAME.match(app):
             return f"error: invalid app name: {app}"
         return run_applescript(f'tell application "{app}" to activate')
+    elif action == "open_url":
+        url = str(params.get("url", "") or "")
+        if not _SAFE_URL.match(url):
+            return f"error: invalid url: {url}"
+        browser = str(params.get("browser", "") or "")
+        if browser:
+            if not _SAFE_APP_NAME.match(browser):
+                return f"error: invalid browser: {browser}"
+            return run_applescript(f'tell application "{browser}" to open location "{url}"')
+        return run_applescript(f'open location "{url}"')
     elif action == "click":
-        click(params["x"], params["y"])
-        return "clicked"
+        pt = _to_logical(params)
+        if pt is None:
+            return "error: click requires params x and y"
+        click(*pt)
+        return f"clicked at {pt[0]},{pt[1]}"
+    elif action == "double_click":
+        pt = _to_logical(params)
+        if pt is None:
+            return "error: double_click requires params x and y"
+        double_click(*pt)
+        return f"double_clicked at {pt[0]},{pt[1]}"
+    elif action == "move_mouse":
+        pt = _to_logical(params)
+        if pt is None:
+            return "error: move_mouse requires params x and y"
+        move_mouse(*pt)
+        return f"moved to {pt[0]},{pt[1]}"
     elif action == "type_text":
-        type_text(params["text"])
+        text = params.get("text")
+        if not text:
+            return "error: type_text requires param text"
+        if len(text) >= _TEXT_INPUT_MIN_CHARS and _TEXT_INPUT_PROVIDER is not None:
+            confirmed = _TEXT_INPUT_PROVIDER(
+                "입력할 내용을 확인하거나 수정한 뒤 Enter를 눌러 주세요", text
+            )
+            if confirmed is None:
+                return "error: 사용자가 텍스트 입력을 취소했습니다"
+            text = confirmed
+        type_text(text)
         return "typed"
     elif action == "press_key":
-        press_key(params["key"])
+        key = params.get("key")
+        if not key:
+            return "error: press_key requires param key"
+        press_key(key)
         return "pressed"
     elif action == "scroll":
-        scroll(params.get("x", 0), params.get("y", 0),
-               params.get("direction", "down"), params.get("amount", 3))
+        # Position is optional; scroll at the current pointer if not given.
+        pt = _to_logical(params) or (0, 0)
+        scroll(pt[0], pt[1], params.get("direction", "down"), params.get("amount", 3))
         return "scrolled"
     elif action == "run_applescript":
-        return run_applescript(params["script"])
+        script = params.get("script")
+        if not script:
+            return "error: run_applescript requires param script"
+        return run_applescript(script)
     elif action == "screenshot":
-        return f"screenshot_taken:{len(take_screenshot())} bytes"
+        return f"screenshot_taken:{len(take_screenshot_with_grid())} bytes"
     elif action == "speak_only":
         return ""
     elif action == "run_routine":
         from routines.manager import RoutineManager
-        mgr = RoutineManager("data/routines.json")
+        mgr = RoutineManager(os.environ.get("VOICEDESK_ROUTINES", "data/routines.json"))
         name = params.get("name", "")
         success = mgr.execute(name, _DispatchExecutor())
         return "routine_done" if success else "routine_failed"

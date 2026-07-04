@@ -5,6 +5,9 @@ import os
 class RoutineManager:
     def __init__(self, routines_path: str = "data/routines.json"):
         self._path = routines_path
+        parent = os.path.dirname(os.path.abspath(self._path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         if not os.path.exists(self._path):
             self._write([])
 

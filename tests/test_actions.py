@@ -11,6 +11,81 @@ def test_speak_calls_say(mocker):
     )
 
 
+def _nvidia_tts_config(**overrides):
+    from config.loader import TTSConfig
+    cfg = TTSConfig(
+        provider="nvidia",
+        nvidia_api_key="nvapi-test",
+        nvidia_function_id="func-123",
+        nvidia_voice="Chatterbox-Multilingual.ko-KR.Male",
+        nvidia_language_code="ko-KR",
+    )
+    for k, v in overrides.items():
+        setattr(cfg, k, v)
+    return cfg
+
+
+def test_speak_uses_nvidia_when_provider_is_nvidia(mocker):
+    mock_run = mocker.patch("subprocess.run")
+    mock_speak_nvidia = mocker.patch("actions.tts._speak_nvidia")
+    from actions.tts import speak
+
+    cfg = _nvidia_tts_config()
+    speak("안녕하세요", tts_config=cfg)
+
+    mock_speak_nvidia.assert_called_once_with("안녕하세요", cfg)
+    mock_run.assert_not_called()
+
+
+def test_speak_nvidia_calls_riva_and_plays_audio(mocker):
+    import sys
+    riva_module = MagicMock()
+    riva_module.client.AudioEncoding.LINEAR_PCM = 1
+    sd_module = MagicMock()
+    np_module = MagicMock()
+    np_module.frombuffer.return_value = "decoded_audio"
+
+    with patch.dict(sys.modules, {
+        "riva.client": riva_module.client,
+        "riva": riva_module,
+        "sounddevice": sd_module,
+        "numpy": np_module,
+    }):
+        mock_resp = MagicMock(audio=b"raw-pcm-bytes")
+        riva_module.client.SpeechSynthesisService.return_value.synthesize.return_value = mock_resp
+
+        from actions.tts import _speak_nvidia
+        cfg = _nvidia_tts_config()
+        _speak_nvidia("안녕하세요", cfg)
+
+        riva_module.client.Auth.assert_called_once()
+        auth_kwargs = riva_module.client.Auth.call_args.kwargs
+        assert auth_kwargs["uri"] == "grpc.nvcf.nvidia.com:443"
+        assert ["function-id", "func-123"] in auth_kwargs["metadata_args"]
+        assert ["authorization", "Bearer nvapi-test"] in auth_kwargs["metadata_args"]
+
+        synth_kwargs = riva_module.client.SpeechSynthesisService.return_value.synthesize.call_args.kwargs
+        assert synth_kwargs["text"] == "안녕하세요"
+        assert synth_kwargs["voice_name"] == "Chatterbox-Multilingual.ko-KR.Male"
+        assert synth_kwargs["language_code"] == "ko-KR"
+
+        sd_module.play.assert_called_once_with("decoded_audio", 22050)
+        sd_module.wait.assert_called_once()
+
+
+def test_speak_falls_back_to_macos_when_nvidia_fails(mocker):
+    mock_run = mocker.patch("subprocess.run")
+    mocker.patch("actions.tts._speak_nvidia", side_effect=RuntimeError("network down"))
+    from actions.tts import speak
+
+    cfg = _nvidia_tts_config()
+    speak("완료했습니다", voice="Yuna", rate=200, tts_config=cfg)
+
+    mock_run.assert_called_once_with(
+        ["say", "-v", "Yuna", "-r", "200", "완료했습니다"], check=True
+    )
+
+
 def test_run_applescript(mocker):
     mock_run = mocker.patch("subprocess.run")
     mock_run.return_value = MagicMock(stdout="result\n", returncode=0)
@@ -29,11 +104,14 @@ def test_take_screenshot(mocker, tmp_path):
     assert data == b"PNG_DATA"
 
 
-def test_click_calls_pyautogui(mocker):
+def test_click_glides_then_clicks(mocker):
     mock_pg = mocker.patch("actions.mouse_keyboard.pyautogui")
     from actions.mouse_keyboard import click
     click(100, 200)
-    mock_pg.click.assert_called_once_with(100, 200)
+    # Cursor visibly moves to the target first (with a duration), then clicks.
+    assert mock_pg.moveTo.call_args.args == (100, 200)
+    assert mock_pg.moveTo.call_args.kwargs["duration"] > 0
+    mock_pg.click.assert_called_once_with()
 
 
 def test_type_text_calls_pyautogui(mocker):
@@ -71,3 +149,203 @@ def test_click_element_by_name_failure(mocker):
     from actions.accessibility import click_element_by_name
     result = click_element_by_name("Safari", "MissingButton")
     assert result is False
+
+
+# ---------------------------------------------------------------------------
+# TTS must never raise (missing voice / broken `say`)
+# ---------------------------------------------------------------------------
+
+def test_speak_survives_say_failure(mocker):
+    import subprocess as sp
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        if "-v" in cmd:
+            raise sp.CalledProcessError(1, cmd)
+        return MagicMock()
+
+    mocker.patch("subprocess.run", side_effect=fake_run)
+    from actions.tts import speak
+    speak("안녕하세요", voice="NoSuchVoice", rate=200)   # must not raise
+    assert ["say", "-r", "200", "안녕하세요"] in calls    # voiceless fallback
+
+
+def test_speak_survives_total_say_failure(mocker):
+    mocker.patch("subprocess.run", side_effect=OSError("say missing"))
+    from actions.tts import speak
+    speak("안녕하세요")                                    # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Keyboard: Korean text and key combos
+# ---------------------------------------------------------------------------
+
+def test_type_text_korean_goes_through_clipboard(mocker):
+    mock_sub = mocker.patch("actions.mouse_keyboard.subprocess.run")
+    import actions.mouse_keyboard as mk
+    mock_typewrite = mocker.patch.object(mk.pyautogui, "typewrite")
+    mock_hotkey = mocker.patch.object(mk.pyautogui, "hotkey")
+
+    mk.type_text("안녕하세요")
+
+    mock_typewrite.assert_not_called()
+    mock_sub.assert_called_once()
+    assert mock_sub.call_args.args[0] == ["pbcopy"]
+    assert mock_sub.call_args.kwargs["input"] == "안녕하세요".encode("utf-8")
+    mock_hotkey.assert_called_once_with("command", "v")
+
+
+def test_type_text_ascii_uses_typewrite(mocker):
+    import actions.mouse_keyboard as mk
+    mock_typewrite = mocker.patch.object(mk.pyautogui, "typewrite")
+    mock_hotkey = mocker.patch.object(mk.pyautogui, "hotkey")
+    mk.type_text("hello")
+    mock_typewrite.assert_called_once()
+    mock_hotkey.assert_not_called()
+
+
+def test_press_key_combo_uses_hotkey(mocker):
+    import actions.mouse_keyboard as mk
+    mock_hotkey = mocker.patch.object(mk.pyautogui, "hotkey")
+    mock_press = mocker.patch.object(mk.pyautogui, "press")
+    mk.press_key("cmd+t")
+    mock_hotkey.assert_called_once_with("command", "t")
+    mock_press.assert_not_called()
+
+
+def test_press_key_single_uses_press(mocker):
+    import actions.mouse_keyboard as mk
+    mock_hotkey = mocker.patch.object(mk.pyautogui, "hotkey")
+    mock_press = mocker.patch.object(mk.pyautogui, "press")
+    mk.press_key("enter")
+    mock_press.assert_called_once_with("enter")
+    mock_hotkey.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Screenshot downscale for vision payloads
+# ---------------------------------------------------------------------------
+
+def test_take_screenshot_captures_active_display_and_downscales(mocker):
+    mock_run = mocker.patch("actions.screen.subprocess.run",
+                            return_value=MagicMock(returncode=0))
+    mocker.patch("actions.screen.os.path.getsize", return_value=1000)
+    mocker.patch("actions.screen.active_screen_rect",
+                 return_value=(-1920.0, 0.0, 1920.0, 1080.0))
+    from actions.screen import take_screenshot
+    take_screenshot()
+    cmds = [c.args[0] for c in mock_run.call_args_list]
+    assert cmds[0][0] == "screencapture"
+    assert "-R" in cmds[0]
+    region = cmds[0][cmds[0].index("-R") + 1]
+    assert region.startswith("-1920")       # external display region, not main
+    assert cmds[1][0] == "sips"
+
+
+def test_move_mouse_glides(mocker):
+    mock_pg = mocker.patch("actions.mouse_keyboard.pyautogui")
+    from actions.mouse_keyboard import move_mouse
+    move_mouse(300, 400)
+    assert mock_pg.moveTo.call_args.args == (300, 400)
+    assert mock_pg.moveTo.call_args.kwargs["duration"] > 0
+    mock_pg.click.assert_not_called()
+
+
+def test_double_click_glides_then_double_clicks(mocker):
+    mock_pg = mocker.patch("actions.mouse_keyboard.pyautogui")
+    from actions.mouse_keyboard import double_click
+    double_click(50, 60)
+    assert mock_pg.moveTo.call_args.args == (50, 60)
+    mock_pg.doubleClick.assert_called_once_with()
+
+
+def test_scroll_without_position_stays_put(mocker):
+    """scroll(0, 0, ...) must NOT jump the pointer to the corner (failsafe)."""
+    mock_pg = mocker.patch("actions.mouse_keyboard.pyautogui")
+    from actions.mouse_keyboard import scroll
+    scroll(0, 0, "down", 3)
+    mock_pg.scroll.assert_called_once_with(-3)      # no x/y → current position
+
+
+# ---------------------------------------------------------------------------
+# Grid-overlay screenshot (computer-use click accuracy)
+# ---------------------------------------------------------------------------
+
+def test_take_screenshot_with_grid_burns_in_gridlines_and_labels(mocker, tmp_path):
+    """The overlay must actually change pixels (gridlines) — a no-op overlay
+    would silently regress click accuracy back to unmarked guessing."""
+    from PIL import Image
+    import actions.screen as screen_mod
+
+    # A flat white 400x300 "screenshot" so any drawn line is trivially detectable.
+    src = tmp_path / "shot.png"
+    Image.new("RGB", (400, 300), (255, 255, 255)).save(src)
+
+    def fake_capture(tmp_path_arg, with_cursor=False):
+        Image.open(src).save(tmp_path_arg)
+
+    mocker.patch.object(screen_mod, "_capture_active_display_png", fake_capture)
+    result = screen_mod.take_screenshot_with_grid()
+
+    out = Image.open(screen_mod.io.BytesIO(result))
+    assert out.format == "PNG"
+    pixels = out.load()
+    # Somewhere along the vertical gridline near x≈40% (400*0.4=160) there
+    # must be a non-white pixel — proof a line was actually drawn.
+    col_has_line = any(pixels[160, y] != (255, 255, 255) for y in range(0, 300, 5))
+    assert col_has_line
+
+
+def test_take_screenshot_with_grid_passes_cursor_flag(mocker):
+    """with_cursor must reach _capture_active_display_png unchanged — it's
+    what lets the move-then-verify-then-click pattern see the real pointer."""
+    from actions.screen import take_screenshot_with_grid
+    from PIL import Image
+
+    mock_capture = mocker.patch("actions.screen._capture_active_display_png")
+
+    def fake_capture(tmp_path_arg, with_cursor=False):
+        Image.new("RGB", (100, 100), "white").save(tmp_path_arg)
+        fake_capture.seen = with_cursor
+    mock_capture.side_effect = fake_capture
+
+    take_screenshot_with_grid(with_cursor=True)
+    assert fake_capture.seen is True
+    take_screenshot_with_grid(with_cursor=False)
+    assert fake_capture.seen is False
+
+
+def test_capture_with_cursor_passes_dash_c_flag(mocker):
+    mock_run = mocker.patch("actions.screen.subprocess.run",
+                            return_value=MagicMock(returncode=0))
+    mocker.patch("actions.screen.os.path.getsize", return_value=1000)
+    mocker.patch("actions.screen.active_screen_rect",
+                 return_value=(0.0, 0.0, 1000.0, 800.0))
+    from actions.screen import _capture_active_display_png
+    _capture_active_display_png("/tmp/x.png", with_cursor=True)
+    flags = mock_run.call_args.args[0]
+    assert "-C" in flags
+    mock_run.reset_mock()
+    _capture_active_display_png("/tmp/x.png", with_cursor=False)
+    flags = mock_run.call_args.args[0]
+    assert "-C" not in flags
+
+
+def test_click_waits_for_ui_to_settle(mocker):
+    import actions.mouse_keyboard as mk
+    mocker.patch.object(mk.pyautogui, "moveTo")
+    mocker.patch.object(mk.pyautogui, "click")
+    mock_sleep = mocker.patch.object(mk.time, "sleep")
+    mk.click(100, 100)
+    mock_sleep.assert_called_once()
+    assert mock_sleep.call_args.args[0] > 0
+
+
+def test_double_click_waits_for_ui_to_settle(mocker):
+    import actions.mouse_keyboard as mk
+    mocker.patch.object(mk.pyautogui, "moveTo")
+    mocker.patch.object(mk.pyautogui, "doubleClick")
+    mock_sleep = mocker.patch.object(mk.time, "sleep")
+    mk.double_click(100, 100)
+    mock_sleep.assert_called_once()
