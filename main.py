@@ -216,7 +216,9 @@ def _record_command(agent: Agent, hud: NotchHUD, stt_adapter,
             hud.set_transcript(command)
 
             hud.set_state("executing")
-            result = agent.run(command)
+            result = agent.try_fast_path(command) if isinstance(agent, Agent) else None
+            if result is None:
+                result = agent.run(command)
             failed = (not result or result == "취소됨"
                       or result.startswith(("error", "오류")))
             hud.set_state("error" if failed else "success")
@@ -260,6 +262,7 @@ def main():
     _pre_load_portaudio()
     _sync_runtime_env()
     _ensure_data_dir()
+    print(f"[Config] Reading/writing settings at {CONFIG_PATH}")
     config = load_config(CONFIG_PATH)
 
     stt = get_stt_adapter(config)

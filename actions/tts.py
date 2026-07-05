@@ -18,6 +18,9 @@ def _speak_macos_safe(text: str, voice: str, rate: int) -> None:
             print(f"[TTS] say failed entirely ({e2}); giving up on speech.", file=sys.stderr)
 
 
+_NVIDIA_SYNTHESIS_TIMEOUT_S = 8
+
+
 def _speak_nvidia(text: str, tts_config) -> None:
     """Synthesize speech via NVIDIA's hosted Riva TTS NIM (gRPC) and play it back."""
     import riva.client
@@ -34,13 +37,19 @@ def _speak_nvidia(text: str, tts_config) -> None:
         ],
     )
     service = riva.client.SpeechSynthesisService(auth)
-    resp = service.synthesize(
+    # future=True + a bounded result() wait: the underlying gRPC call has no
+    # client-side deadline, so a slow/hung NVIDIA endpoint would otherwise
+    # block speak() (and the whole agent loop) indefinitely instead of
+    # falling back to local voice.
+    future = service.synthesize(
         text=text,
         voice_name=tts_config.nvidia_voice,
         language_code=tts_config.nvidia_language_code,
         encoding=riva.client.AudioEncoding.LINEAR_PCM,
         sample_rate_hz=sample_rate,
+        future=True,
     )
+    resp = future.result(timeout=_NVIDIA_SYNTHESIS_TIMEOUT_S)
     audio = np.frombuffer(resp.audio, dtype=np.int16)
     sd.play(audio, sample_rate)
     sd.wait()

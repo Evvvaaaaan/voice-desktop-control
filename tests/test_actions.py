@@ -51,8 +51,9 @@ def test_speak_nvidia_calls_riva_and_plays_audio(mocker):
         "sounddevice": sd_module,
         "numpy": np_module,
     }):
-        mock_resp = MagicMock(audio=b"raw-pcm-bytes")
-        riva_module.client.SpeechSynthesisService.return_value.synthesize.return_value = mock_resp
+        mock_future = MagicMock()
+        mock_future.result.return_value = MagicMock(audio=b"raw-pcm-bytes")
+        riva_module.client.SpeechSynthesisService.return_value.synthesize.return_value = mock_future
 
         from actions.tts import _speak_nvidia
         cfg = _nvidia_tts_config()
@@ -68,9 +69,42 @@ def test_speak_nvidia_calls_riva_and_plays_audio(mocker):
         assert synth_kwargs["text"] == "안녕하세요"
         assert synth_kwargs["voice_name"] == "Chatterbox-Multilingual.ko-KR.Male"
         assert synth_kwargs["language_code"] == "ko-KR"
+        assert synth_kwargs["future"] is True
+
+        # A bounded timeout must be passed to result(); an NVIDIA hang or slow
+        # cold-start must not be able to block speak() indefinitely.
+        result_kwargs = mock_future.result.call_args.kwargs
+        assert 0 < result_kwargs["timeout"] <= 10
 
         sd_module.play.assert_called_once_with("decoded_audio", 22050)
         sd_module.wait.assert_called_once()
+
+
+def test_speak_nvidia_times_out_and_falls_back_to_macos(mocker):
+    import sys
+    riva_module = MagicMock()
+    riva_module.client.AudioEncoding.LINEAR_PCM = 1
+    sd_module = MagicMock()
+    np_module = MagicMock()
+    mock_run = mocker.patch("subprocess.run")
+
+    with patch.dict(sys.modules, {
+        "riva.client": riva_module.client,
+        "riva": riva_module,
+        "sounddevice": sd_module,
+        "numpy": np_module,
+    }):
+        mock_future = MagicMock()
+        mock_future.result.side_effect = TimeoutError("synthesis timed out")
+        riva_module.client.SpeechSynthesisService.return_value.synthesize.return_value = mock_future
+
+        from actions.tts import speak
+        cfg = _nvidia_tts_config()
+        speak("완료했습니다", voice="Yuna", rate=200, tts_config=cfg)
+
+        mock_run.assert_called_once_with(
+            ["say", "-v", "Yuna", "-r", "200", "완료했습니다"], check=True
+        )
 
 
 def test_speak_falls_back_to_macos_when_nvidia_fails(mocker):

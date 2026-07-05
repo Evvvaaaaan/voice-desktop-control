@@ -301,6 +301,25 @@ class TestRecordCommand:
         assert states[3] == "success"
         assert states[4] == "idle"
 
+    def test_real_agent_fast_path_runs_before_llm_path(self, mocker):
+        mocker.patch("main.record_audio", return_value=b"wav_bytes")
+        mocker.patch("time.sleep")
+        from main import _record_command
+        from agent.core import Agent
+
+        hud = MagicMock()
+        stt = MagicMock()
+        stt.transcribe.return_value = "크롬 열어줘"
+        agent = Agent(MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        agent.try_fast_path = MagicMock(return_value="완료")
+        agent.run = MagicMock()
+
+        _record_command(agent, hud, stt)
+
+        agent.try_fast_path.assert_called_once_with("크롬 열어줘")
+        agent.run.assert_not_called()
+        hud.set_state.assert_any_call("success")
+
 
 # ---------------------------------------------------------------------------
 # Orchestrator — main() wiring

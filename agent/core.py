@@ -7,6 +7,7 @@ from metrics.collector import MetricsCollector
 from routines.detector import RoutineDetector
 from agent.cache import HotCommandCache
 from agent.context import ConversationContext
+from agent.fast_path import parse_fast_path
 from agent import tools
 from actions.tts import speak
 from actions.applescript import run_applescript
@@ -20,6 +21,8 @@ MAX_ITERATIONS = 8
 # JSON before giving up, so a model that never complies can't burn the
 # whole iteration budget on retries alone.
 MAX_JSON_RETRIES = 2
+
+_SCREEN_OBSERVATION_ACTIONS = {"screenshot", "click", "double_click", "move_mouse", "scroll", "type_text"}
 
 _THINK_BLOCK_RE = re.compile(r'<think>.*?</think>', re.DOTALL)
 
@@ -80,12 +83,50 @@ class Agent:
             f"현재 활성 앱: {front or '알 수 없음'}. "
             "요청이 완전히 끝났으면 done=true로, 아니면 다음 단계를 수행하세요."
         )
-        if getattr(self._llm, "supports_vision", False) is True:
+        if (
+            getattr(self._llm, "supports_vision", False) is True
+            and action in _SCREEN_OBSERVATION_ACTIONS
+        ):
             try:
                 return self._llm.build_observation(text, take_screenshot_with_grid())
             except Exception:
                 pass
         return {"role": "user", "content": text}
+
+    def try_fast_path(self, command: str) -> str | None:
+        parsed = parse_fast_path(command)
+        if parsed is None:
+            return None
+
+        start = time.monotonic()
+        action, params, response_text = parsed
+        dangerous = self._guard.is_dangerous(action, params)
+        if not self._guard.check(action, params):
+            speak("작업을 취소했습니다.", self._tts.voice, self._tts.rate, tts_config=self._tts)
+            final_response = "취소됨"
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            is_repeated = self._detector.record(command)
+            self._context.add_turn(command, final_response)
+            self._collector.record(command, 0.95, False, 0, dangerous, elapsed_ms, is_repeated)
+            return final_response
+
+        dispatch_res = tools.dispatch(action, params)
+        failed = isinstance(dispatch_res, str) and dispatch_res.startswith("error")
+        final_response = (
+            f"오류: 빠른 실행에 실패했어요. {dispatch_res}"
+            if failed else response_text
+        )
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        is_repeated = self._detector.record(command)
+        success = not failed
+
+        self._context.add_turn(command, final_response)
+        self._collector.record(command, 0.95, success, 0, dangerous, elapsed_ms, is_repeated)
+        self._set_state("success" if success else "error")
+        speak(final_response, self._tts.voice, self._tts.rate, tts_config=self._tts)
+        if is_repeated:
+            speak("이 명령을 루틴으로 저장할까요?", self._tts.voice, self._tts.rate, tts_config=self._tts)
+        return final_response
 
     def run(self, command: str) -> str:
         start = time.monotonic()

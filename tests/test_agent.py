@@ -48,6 +48,60 @@ def test_agent_run_uses_cache(mocker):
     mock_llm.complete.assert_not_called()
 
 
+def test_agent_fast_path_launches_known_app_without_llm(mocker):
+    mock_llm = MagicMock()
+    mock_guard = MagicMock()
+    mock_guard.check.return_value = True
+    mock_guard.is_dangerous.return_value = False
+    mock_collector = MagicMock()
+    mock_detector = MagicMock()
+    mock_detector.record.return_value = False
+    mock_tts_cfg = MagicMock(voice="Yuna", rate=200)
+    agent = Agent(mock_llm, mock_guard, mock_collector, mock_detector, mock_tts_cfg)
+
+    mock_dispatch = mocker.patch("agent.core.tools.dispatch", return_value="")
+    mock_speak = mocker.patch("agent.core.speak")
+
+    result = agent.try_fast_path("크롬 열어줘")
+
+    assert result == "크롬을 열었어요."
+    mock_dispatch.assert_called_once_with("launch_app", {"app": "Google Chrome"})
+    mock_llm.complete.assert_not_called()
+    mock_speak.assert_called_once_with("크롬을 열었어요.", "Yuna", 200, tts_config=mock_tts_cfg)
+
+
+def test_agent_fast_path_opens_search_without_llm(mocker):
+    mock_llm = MagicMock()
+    mock_guard = MagicMock()
+    mock_guard.check.return_value = True
+    mock_guard.is_dangerous.return_value = False
+    mock_detector = MagicMock()
+    mock_detector.record.return_value = False
+    agent = Agent(mock_llm, mock_guard, MagicMock(), mock_detector, MagicMock(voice="Yuna", rate=200))
+
+    mock_dispatch = mocker.patch("agent.core.tools.dispatch", return_value="")
+    mocker.patch("agent.core.speak")
+
+    result = agent.try_fast_path("구글에서 gmail 검색해줘")
+
+    assert result == "gmail 검색을 열었어요."
+    mock_dispatch.assert_called_once_with(
+        "open_url", {"url": "https://www.google.com/search?q=gmail"}
+    )
+    mock_llm.complete.assert_not_called()
+
+
+def test_agent_fast_path_leaves_composite_commands_to_llm(mocker):
+    mock_llm = MagicMock()
+    agent = Agent(mock_llm, MagicMock(), MagicMock(), MagicMock(), MagicMock())
+    mock_dispatch = mocker.patch("agent.core.tools.dispatch")
+
+    result = agent.try_fast_path("크롬 열고 gmail 검색해줘")
+
+    assert result is None
+    mock_dispatch.assert_not_called()
+
+
 def test_dispatch_launch_app_rejects_injection():
     result = dispatch("launch_app", {"app": 'Safari"; do shell script "rm -rf ~'})
     assert result.startswith("error: invalid app name")
@@ -171,7 +225,7 @@ def test_agent_multistep_command_not_cached(mocker):
     assert agent._cache._freq.get(cmd, 0) == 0
 
 
-def test_agent_vision_provider_feeds_screenshot(mocker):
+def test_agent_vision_provider_uses_text_observation_after_launch(mocker):
     mock_llm = MagicMock()
     mock_llm.supports_vision = True
     mock_llm.build_observation.return_value = {"role": "user", "content": "obs"}
@@ -186,6 +240,31 @@ def test_agent_vision_provider_feeds_screenshot(mocker):
     mocker.patch("agent.core.speak")
 
     agent.run("사파리 열어줘")
+
+    mock_shot.assert_not_called()
+    mock_llm.build_observation.assert_not_called()
+    second_call_messages = mock_llm.complete.call_args_list[1].args[0]
+    assert any(
+        isinstance(m.get("content"), str) and "직전 동작 'launch_app'" in m["content"]
+        for m in second_call_messages
+    )
+
+
+def test_agent_vision_provider_feeds_screenshot_for_screen_actions(mocker):
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = True
+    mock_llm.build_observation.return_value = {"role": "user", "content": "obs"}
+    mock_llm.complete.side_effect = [
+        '{"action": "screenshot", "params": {}, "done": false, "response": ""}',
+        '{"action": "speak_only", "params": {}, "done": true, "response": "완료"}',
+    ]
+    agent = _make_agent(mock_llm)
+    mocker.patch("agent.core.tools.dispatch", return_value="screenshot_taken:1 bytes")
+    mock_shot = mocker.patch("agent.core.take_screenshot_with_grid", return_value=b"png")
+    mocker.patch("agent.core.run_applescript", return_value="Safari")
+    mocker.patch("agent.core.speak")
+
+    agent.run("화면을 보고 알려줘")
 
     mock_shot.assert_called()
     mock_llm.build_observation.assert_called_once()
