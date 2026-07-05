@@ -53,6 +53,10 @@ from routines.manager import RoutineManager
 from activation.hotkey import HotkeyListener
 from activation.wake_word import WakeWordListener
 from agent.core import Agent
+from memory.store import MemoryStore
+from memory.embedder import get_embedder
+from memory.retriever import MemoryRetriever
+from memory.summarizer import DailySummarizer
 from ui.notch_hud import NotchHUD
 from ui.menubar import VoiceDeskMenuBar
 from ui.settings.window import SettingsWindow
@@ -279,8 +283,21 @@ def main():
     hud.set_state("idle")
     hud.set_provider_info(*_provider_info(config))
 
+    memory_store = None
+    if config.memory.enabled:
+        try:
+            memory_store = MemoryStore(DB_PATH)
+        except Exception as e:
+            print(f"[Memory] store init failed ({e}); memory disabled.", file=sys.stderr)
+    embedder = get_embedder(config)
+    retriever = (MemoryRetriever(memory_store, embedder, top_k=config.memory.retrieval_top_k)
+                 if memory_store else None)
+
     agent = Agent(llm, guard, collector, detector, config.tts,
-                  on_state=hud.set_state)
+                  on_state=hud.set_state, memory=memory_store, retriever=retriever)
+
+    if memory_store:
+        DailySummarizer(memory_store, llm, embedder).start_background()
 
     def on_activation():
         t = threading.Thread(
@@ -295,6 +312,10 @@ def main():
         stt = get_stt_adapter(new_config)
         llm = get_llm_adapter(new_config)
         agent.set_llm(llm)
+        if memory_store:
+            agent.set_retriever(MemoryRetriever(
+                memory_store, get_embedder(new_config),
+                top_k=new_config.memory.retrieval_top_k))
         hud.set_provider_info(*_provider_info(new_config))
         hud.set_widgets(new_config.hud.show_clock, new_config.hud.show_media,
                         new_config.hud.show_battery, new_config.hud.hover_to_expand,

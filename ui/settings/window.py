@@ -14,6 +14,7 @@ _TABS = [
     ("LLM",         "cpu"),
     ("TTS",         "speaker.wave.2"),
     ("Routines",    "list.bullet"),
+    ("Profile",     "person.crop.circle"),
     ("Metrics",     "chart.bar"),
     ("Permissions", "lock.shield"),
     ("About",       "info.circle"),
@@ -143,6 +144,7 @@ class SettingsWindow:
             "LLM":         self._build_llm,
             "TTS":         self._build_tts,
             "Routines":    self._build_routines,
+            "Profile":     self._build_profile,
             "Metrics":     self._build_metrics,
             "Permissions": self._build_permissions,
             "About":       self._build_about,
@@ -175,6 +177,13 @@ class SettingsWindow:
         from routines.manager import RoutineManager
         try:
             build_routines_page(self._body, self._config, RoutineManager(self._routines_path), self._save)
+        except Exception:
+            pass
+
+    def _build_profile(self):
+        from ui.settings.page_profile import build_profile_page
+        try:
+            self._page_builder = build_profile_page(self._body, self._db_path)
         except Exception:
             pass
 

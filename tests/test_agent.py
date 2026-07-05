@@ -691,3 +691,76 @@ def test_cached_result_state_reported_before_speak(mocker):
 
     assert "state:success" in call_order
     assert call_order.index("state:success") < call_order.index("speak")
+
+
+def test_agent_memory_hooks_record_action_and_conversation(mocker):
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.return_value = (
+        '{"action": "launch_app", "params": {"app": "Safari"}, "done": true, "response": "열었어요"}'
+    )
+    mock_memory = MagicMock()
+    agent = _make_agent(mock_llm)
+    agent._memory = mock_memory
+    mocker.patch("agent.core.tools.dispatch", return_value="ok")
+    mocker.patch("agent.core.speak")
+
+    agent.run("사파리 열어줘")
+
+    action_args = mock_memory.log_action.call_args.args
+    assert action_args[0] == "사파리 열어줘"
+    assert action_args[1] == "launch_app"
+    assert action_args[2] == "Safari"
+    assert action_args[3] is True
+    cmd_args = mock_memory.log_command.call_args.args
+    assert cmd_args[0] == "사파리 열어줘"
+    assert cmd_args[1] is True
+    conv_args = mock_memory.log_conversation.call_args.args
+    assert conv_args == ("사파리 열어줘", "열었어요")
+
+
+def test_agent_memory_failure_never_breaks_command(mocker):
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.return_value = (
+        '{"action": "launch_app", "params": {"app": "Safari"}, "done": true, "response": "열었어요"}'
+    )
+    mock_memory = MagicMock()
+    mock_memory.log_action.side_effect = Exception("disk full")
+    mock_memory.log_command.side_effect = Exception("disk full")
+    mock_memory.log_conversation.side_effect = Exception("disk full")
+    agent = _make_agent(mock_llm)
+    agent._memory = mock_memory
+    mock_retriever = MagicMock()
+    mock_retriever.build_memory_block.side_effect = Exception("db locked")
+    agent._retriever = mock_retriever
+    mocker.patch("agent.core.tools.dispatch", return_value="ok")
+    mocker.patch("agent.core.speak")
+
+    result = agent.run("사파리 열어줘")
+
+    assert result == "열었어요"
+    # metrics collection must still happen
+    assert agent._collector.record.call_args.args[2] is True
+
+
+def test_agent_retriever_block_reaches_system_prompt(mocker):
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.return_value = (
+        '{"action": "speak_only", "params": {}, "done": true, "response": "네"}'
+    )
+    mock_retriever = MagicMock()
+    mock_retriever.build_memory_block.return_value = "- name: 하민"
+    agent = _make_agent(mock_llm)
+    agent._retriever = mock_retriever
+    mocker.patch("agent.core.tools.dispatch", return_value="")
+    mocker.patch("agent.core.speak")
+
+    agent.run("내 이름 뭐야")
+
+    messages = mock_llm.complete.call_args.args[0]
+    system = messages[0]
+    assert system["role"] == "system"
+    assert "- name: 하민" in system["content"]
+    mock_retriever.build_memory_block.assert_called_once_with("내 이름 뭐야")

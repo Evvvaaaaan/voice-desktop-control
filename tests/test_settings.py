@@ -130,7 +130,8 @@ class TestSettingsWindowInit:
     def test_pages_list(self):
         from ui.settings.window import SettingsWindow
         assert SettingsWindow.PAGES == [
-            "General", "STT", "LLM", "TTS", "Routines", "Metrics", "Permissions", "About"
+            "General", "STT", "LLM", "TTS", "Routines", "Profile", "Metrics",
+            "Permissions", "About"
         ]
 
 

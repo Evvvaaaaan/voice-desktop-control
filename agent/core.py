@@ -47,6 +47,8 @@ class Agent:
         detector: RoutineDetector,
         tts_config,
         on_state=None,
+        memory=None,
+        retriever=None,
     ):
         self._llm = llm
         self._guard = guard
@@ -54,6 +56,8 @@ class Agent:
         self._detector = detector
         self._tts = tts_config
         self._on_state = on_state
+        self._memory = memory
+        self._retriever = retriever
         self._cache = HotCommandCache()
         self._context = ConversationContext()
 
@@ -66,6 +70,39 @@ class Agent:
 
     def set_llm(self, llm: LLMBase) -> None:
         self._llm = llm
+
+    def set_retriever(self, retriever) -> None:
+        self._retriever = retriever
+
+    def _log_action(self, command: str, action: str, params: dict,
+                    dispatch_res: str) -> None:
+        """Tier-2 behavior log; must never break the command loop."""
+        if self._memory is None:
+            return
+        try:
+            target = str(params.get("app") or params.get("url")
+                         or params.get("key") or params.get("name") or "")
+            self._memory.log_action(
+                command, action, target,
+                not (isinstance(dispatch_res, str) and dispatch_res.startswith("error")),
+                json.dumps(params, ensure_ascii=False)[:500],
+            )
+        except Exception as e:
+            import sys
+            print(f"[Memory] log_action failed: {e}", file=sys.stderr)
+
+    def _log_outcome(self, command: str, success: bool, elapsed_ms: int,
+                     final_response: str | None = None) -> None:
+        """Tier-2 command/conversation log; must never break the command loop."""
+        if self._memory is None:
+            return
+        try:
+            self._memory.log_command(command, success, elapsed_ms)
+            if final_response is not None:
+                self._memory.log_conversation(command, final_response)
+        except Exception as e:
+            import sys
+            print(f"[Memory] log_outcome failed: {e}", file=sys.stderr)
 
     def _observe(self, action: str, dispatch_res: str) -> dict:
         """Build the post-action observation message fed back into the loop."""
@@ -113,6 +150,8 @@ class Agent:
                 result = tools.dispatch(action_str, params_dict)
             elapsed_ms = int((time.monotonic() - start) * 1000)
             failed = isinstance(result, str) and result.startswith("error")
+            self._log_action(command, action_str, params_dict, result)
+            self._log_outcome(command, not failed, elapsed_ms)
             self._set_state("error" if failed else "success")
             if failed:
                 speak("저장된 명령 실행에 실패했어요.", self._tts.voice, self._tts.rate, tts_config=self._tts)
@@ -129,7 +168,14 @@ class Agent:
         json_retries = 0
         # Maintain one running message list so each step remembers the original
         # command and the assistant's prior actions/observations.
-        messages = self._context.to_messages(command)
+        memory_block = None
+        if self._retriever:
+            try:
+                memory_block = self._retriever.build_memory_block(command)
+            except Exception as e:
+                import sys
+                print(f"[Memory] retrieval failed: {e}", file=sys.stderr)
+        messages = self._context.to_messages(command, memory_block=memory_block)
         for i in range(MAX_ITERATIONS):
             try:
                 raw = self._llm.complete(messages)
@@ -207,6 +253,7 @@ class Agent:
             dispatch_res = tools.dispatch(action, params)
             last_dispatch = dispatch_res
             print(f"[Agent] Dispatch result: '{dispatch_res}'", file=sys.stderr)
+            self._log_action(command, action, params, dispatch_res)
 
             if done:
                 if dispatch_res.startswith("error"):
@@ -246,6 +293,7 @@ class Agent:
 
         is_repeated = self._detector.record(command)
         self._context.add_turn(command, final_response)
+        self._log_outcome(command, success, elapsed_ms, final_response)
         self._collector.record(command, 0.95, success, retry,
                                self._guard.is_dangerous(action, params),
                                elapsed_ms, is_repeated)

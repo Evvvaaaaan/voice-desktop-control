@@ -82,8 +82,15 @@ class ConversationContext:
     def add_turn(self, user: str, assistant: str) -> None:
         self._turns.append((user, assistant))
 
-    def to_messages(self, current_user: str | None = None) -> list[dict]:
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    def to_messages(self, current_user: str | None = None,
+                    memory_block: str | None = None) -> list[dict]:
+        system = SYSTEM_PROMPT
+        if memory_block:
+            # One merged system message: ClaudeAdapter extracts the first
+            # system message; the other adapters pass messages through as-is.
+            system += ("\n\n[사용자 기억 — 관련 시 참고, 명령과 무관하면 무시]\n"
+                       + memory_block)
+        messages = [{"role": "system", "content": system}]
         for user_msg, asst_msg in self._turns:
             messages.append({"role": "user", "content": user_msg})
             messages.append({"role": "assistant", "content": asst_msg})

@@ -59,6 +59,16 @@ class HUDConfig:
 
 
 @dataclass
+class MemoryConfig:
+    enabled: bool = True
+    embedding_provider: str = "auto"     # auto | openai | nvidia | ollama | off
+    openai_embedding_model: str = "text-embedding-3-small"
+    nvidia_embedding_model: str = "nvidia/nv-embedqa-e5-v5"
+    ollama_embedding_model: str = "nomic-embed-text"
+    retrieval_top_k: int = 3
+
+
+@dataclass
 class Config:
     stt: STTConfig = field(default_factory=STTConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
@@ -66,6 +76,7 @@ class Config:
     tts: TTSConfig = field(default_factory=TTSConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     hud: HUDConfig = field(default_factory=HUDConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
 
 def _from_dict(cls, data: dict) -> Any:
@@ -85,6 +96,7 @@ def load_config(path: str = "config.yaml") -> Config:
         tts=_from_dict(TTSConfig, raw.get("tts", {})),
         safety=_from_dict(SafetyConfig, raw.get("safety", {})),
         hud=_from_dict(HUDConfig, raw.get("hud", {})),
+        memory=_from_dict(MemoryConfig, raw.get("memory", {})),
     )
 
 
