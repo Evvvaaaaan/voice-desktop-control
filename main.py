@@ -57,6 +57,7 @@ from memory.store import MemoryStore
 from memory.embedder import get_embedder
 from memory.retriever import MemoryRetriever
 from memory.summarizer import DailySummarizer
+from memory.suggester import SuggestionEngine
 from ui.notch_hud import NotchHUD
 from ui.menubar import VoiceDeskMenuBar
 from ui.settings.window import SettingsWindow
@@ -298,6 +299,45 @@ def main():
 
     if memory_store:
         DailySummarizer(memory_store, llm, embedder).start_background()
+
+    def _try_begin_session() -> bool:
+        return _COMMAND_LOCK.acquire(blocking=False)
+
+    def _end_session() -> None:
+        _COMMAND_LOCK.release()
+        # The user tried to speak during the suggestion — replay it, same as
+        # _record_command's finally block.
+        if _PENDING_ACTIVATION.is_set():
+            _PENDING_ACTIVATION.clear()
+            threading.Thread(
+                target=_record_command, args=(agent, hud, stt),
+                kwargs={"follow_up": config.activation.continuous}, daemon=True,
+            ).start()
+
+    def _run_suggested(command: str) -> None:
+        # The suggestion session already holds _COMMAND_LOCK; mirror
+        # _record_command's executing tail minus recording/lock.
+        hud.set_transcript(command)
+        hud.set_state("executing")
+        result = agent.run(command)
+        failed = (not result or result == "취소됨"
+                  or result.startswith(("error", "오류")))
+        hud.set_state("error" if failed else "success")
+        import time
+        time.sleep(1.5)
+        hud.set_transcript("")
+        hud.set_state("idle")
+
+    if memory_store and config.suggestion.enabled:
+        from actions.tts import speak as _suggest_speak
+        SuggestionEngine(
+            memory_store, config.suggestion,
+            speak_fn=lambda text: _suggest_speak(
+                text, config.tts.voice, config.tts.rate, tts_config=config.tts),
+            run_command_fn=_run_suggested,
+            begin_session=_try_begin_session, end_session=_end_session,
+            hud=hud,
+        ).start_background()
 
     def on_activation():
         t = threading.Thread(

@@ -309,3 +309,65 @@ def test_context_merges_memory_block_into_single_system_message():
     assert "- name: 하민" in systems[0]["content"]
     # without a block the output is unchanged
     assert ctx.to_messages("명령")[0]["content"] == SYSTEM_PROMPT
+
+
+# ---------- hourly_commands pattern ----------
+
+def _insert_command_at(db_path, command, days_ago, hour):
+    """Insert a behavior_log command row at a specific local day/hour."""
+    local = (datetime.now().astimezone() - timedelta(days=days_ago)).replace(
+        hour=hour, minute=0, second=0, microsecond=0)
+    ts = local.astimezone(timezone.utc).isoformat()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO behavior_log VALUES (NULL,?,?,?,?,?,?,?)",
+            (ts, "command", command, None, None, 1, "{}"),
+        )
+
+
+def test_compute_patterns_hourly_commands(store, db_path):
+    for days_ago in (1, 2, 3):
+        _insert_command_at(db_path, "크롬 열어줘", days_ago, 9)
+    patterns = compute_patterns(store)
+    assert patterns["hourly_commands"]["9"][0] == ["크롬 열어줘", 3]
+
+
+def test_compute_patterns_hourly_excludes_single_day_burst(store, db_path):
+    for _ in range(4):
+        _insert_command_at(db_path, "유튜브 틀어줘", 1, 21)
+    patterns = compute_patterns(store)
+    assert "21" not in patterns.get("hourly_commands", {})
+
+
+# ---------- suggestion_log store helpers ----------
+
+def test_suggestion_log_roundtrip_and_last_at(store):
+    assert store.last_suggestion_at() is None
+    store.log_suggestion("크롬 열어줘", 9, "accepted")
+    store.log_suggestion("메일 확인해줘", 10, "timeout")
+    last = store.last_suggestion_at()
+    assert last is not None
+    assert datetime.fromisoformat(last).hour == datetime.now(timezone.utc).hour
+
+
+def test_suggestion_declined_on_matches_day_and_key(store, db_path):
+    store.log_suggestion("크롬 열어줘", 9, "declined")
+    today = datetime.now().astimezone().strftime("%Y-%m-%d")
+    yesterday = (datetime.now().astimezone() - timedelta(days=1)).strftime("%Y-%m-%d")
+    assert store.suggestion_declined_on("크롬 열어줘", today) is True
+    assert store.suggestion_declined_on("크롬 열어줘", yesterday) is False
+    assert store.suggestion_declined_on("다른 명령", today) is False
+    # survives a restart (new MemoryStore over the same file)
+    assert MemoryStore(db_path).suggestion_declined_on("크롬 열어줘", today) is True
+    # accepted/timeout outcomes don't suppress
+    store.log_suggestion("메일 확인해줘", 9, "timeout")
+    assert store.suggestion_declined_on("메일 확인해줘", today) is False
+
+
+def test_command_seen_since(store):
+    store.log_command("크롬 열어줘", True, 100)
+    hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    just_now = (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat()
+    assert store.command_seen_since("크롬 열어줘", hour_ago) is True
+    assert store.command_seen_since("크롬 열어줘", just_now) is False
+    assert store.command_seen_since("다른 명령", hour_ago) is False

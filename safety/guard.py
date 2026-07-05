@@ -38,32 +38,9 @@ _DANGEROUS_SUBSTRINGS = re.compile(
 )
 
 
-def _listen_for_confirmation() -> str:
-    import sounddevice as sd
-    import numpy as np
-    import tempfile, wave, os
-    from stt.macos_speech import MacOSSpeechAdapter
-
-    sample_rate = 16000
-    duration = 3
-    audio = sd.rec(int(duration * sample_rate), samplerate=sample_rate,
-                   channels=1, dtype="int16")
-    sd.wait()
-
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        with wave.open(f.name, "w") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(sample_rate)
-            wf.writeframes(audio.tobytes())
-        tmp_path = f.name
-
-    try:
-        adapter = MacOSSpeechAdapter()
-        with open(tmp_path, "rb") as af:
-            return adapter.transcribe(af.read()).strip()
-    finally:
-        os.unlink(tmp_path)
+# Shared with the proactive-suggestion flow; the alias keeps this module's
+# patch seam (`safety.guard._listen_for_confirmation`) intact for tests.
+from stt.confirm import listen_for_confirmation as _listen_for_confirmation
 
 
 class SafetyGuard:

@@ -54,6 +54,14 @@ CREATE TABLE IF NOT EXISTS pattern_data (
     value TEXT NOT NULL,
     computed_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS suggestion_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    suggestion_key TEXT NOT NULL,
+    hour INTEGER NOT NULL,
+    outcome TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_suggestion_ts ON suggestion_log(timestamp);
 """
 
 
@@ -241,6 +249,38 @@ class MemoryStore:
                     ORDER BY t.id LIMIT ?""",
                 (source_type, limit),
             ).fetchall()
+
+    # ----- suggestions -----
+
+    def log_suggestion(self, key: str, hour: int, outcome: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO suggestion_log VALUES (NULL,?,?,?,?)",
+                (_now(), key, hour, outcome),
+            )
+
+    def last_suggestion_at(self) -> str | None:
+        with self._conn() as conn:
+            row = conn.execute("SELECT MAX(timestamp) FROM suggestion_log").fetchone()
+        return row[0] if row else None
+
+    def suggestion_declined_on(self, key: str, local_day: str) -> bool:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT timestamp FROM suggestion_log "
+                "WHERE suggestion_key=? AND outcome='declined'",
+                (key,),
+            ).fetchall()
+        return any(_local_day(ts) == local_day for (ts,) in rows)
+
+    def command_seen_since(self, command: str, since_utc_iso: str) -> bool:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM behavior_log "
+                "WHERE event_type='command' AND command=? AND timestamp>=? LIMIT 1",
+                (command, since_utc_iso),
+            ).fetchone()
+        return row is not None
 
     # ----- tier 5: pattern data -----
 

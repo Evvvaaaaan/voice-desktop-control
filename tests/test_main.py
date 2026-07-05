@@ -340,6 +340,7 @@ class TestOrchestratorWiring:
         mock_wakeword_cls = mocker.patch("main.WakeWordListener", return_value=MagicMock())
         mock_settings_cls = mocker.patch("main.SettingsWindow", return_value=MagicMock())
         mock_menubar_cls = mocker.patch("main.VoiceDeskMenuBar", return_value=MagicMock())
+        mock_suggester_cls = mocker.patch("main.SuggestionEngine", return_value=MagicMock())
 
         return {
             "config": fake_config,
@@ -357,6 +358,7 @@ class TestOrchestratorWiring:
             "wakeword": mock_wakeword_cls,
             "settings": mock_settings_cls,
             "menubar": mock_menubar_cls,
+            "suggester": mock_suggester_cls,
         }
 
     def test_load_config_called(self, mocker, tmp_path):
@@ -393,6 +395,22 @@ class TestOrchestratorWiring:
         hud_instance = mocks["hud"].return_value
         hud_instance.show.assert_called_once()
         hud_instance.set_state.assert_called_with("idle")
+
+    def test_suggestion_engine_started_when_memory_enabled(self, mocker, tmp_path):
+        mocks = self._patch_all(mocker, tmp_path)
+        from main import main
+        main()
+        mocks["suggester"].assert_called_once()
+        args = mocks["suggester"].call_args
+        assert args.args[1] is mocks["config"].suggestion
+        mocks["suggester"].return_value.start_background.assert_called_once()
+
+    def test_suggestion_engine_skipped_when_disabled(self, mocker, tmp_path):
+        mocks = self._patch_all(mocker, tmp_path)
+        mocks["config"].suggestion.enabled = False
+        from main import main
+        main()
+        mocks["suggester"].assert_not_called()
 
     def test_settings_window_gets_paths(self, mocker, tmp_path):
         mocks = self._patch_all(mocker, tmp_path)
