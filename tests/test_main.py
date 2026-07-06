@@ -177,6 +177,53 @@ class TestProviderInfo:
         assert _provider_info(cfg) == ("macos", "ollama", "llama3", "macos", "Yuna")
 
 
+class TestProjectConfigPath:
+    """A dev run (`python3 main.py` from the repo) must prefer the repo's own
+    config.yaml over the per-user copy in STATE_DIR — otherwise edits to it
+    silently do nothing, since STATE_DIR's copy is seeded once from Config()
+    defaults and read/written from then on instead."""
+
+    def test_prefers_repo_config_when_present_and_not_frozen(self, mocker, tmp_path):
+        import main
+        repo_cfg = tmp_path / "config.yaml"
+        repo_cfg.write_text("stt:\n  provider: macos\n")
+        mocker.patch("main.__file__", str(tmp_path / "main.py"))
+        mocker.patch.object(main.sys, "frozen", False, create=True)
+        assert main._project_config_path() == str(repo_cfg)
+
+    def test_returns_none_when_repo_config_missing(self, mocker, tmp_path):
+        import main
+        mocker.patch("main.__file__", str(tmp_path / "main.py"))
+        mocker.patch.object(main.sys, "frozen", False, create=True)
+        assert main._project_config_path() is None
+
+    def test_returns_none_when_frozen_even_if_repo_config_exists(self, mocker, tmp_path):
+        """The packaged .app bundles its own config.yaml (see setup.py's
+        DATA_FILES) — it must never be treated as the writable settings
+        file, so STATE_DIR stays in charge there."""
+        import main
+        (tmp_path / "config.yaml").write_text("stt:\n  provider: macos\n")
+        mocker.patch("main.__file__", str(tmp_path / "main.py"))
+        mocker.patch.object(main.sys, "frozen", True, create=True)
+        assert main._project_config_path() is None
+
+    def test_env_var_overrides_project_config(self, mocker, tmp_path):
+        """VOICEDESK_CONFIG stays the ultimate explicit override, ahead of
+        both the repo config.yaml and STATE_DIR."""
+        import importlib
+        import main
+        repo_cfg = tmp_path / "config.yaml"
+        repo_cfg.write_text("stt:\n  provider: macos\n")
+        explicit_cfg = tmp_path / "explicit.yaml"
+        mocker.patch.dict("os.environ", {"VOICEDESK_CONFIG": str(explicit_cfg)})
+        mocker.patch("main.__file__", str(tmp_path / "main.py"))
+        try:
+            importlib.reload(main)
+            assert main.CONFIG_PATH == str(explicit_cfg)
+        finally:
+            importlib.reload(main)
+
+
 def test_record_command_passes_mic_level_callback(mocker):
     rec = mocker.patch("main.record_audio", return_value=b"wav")
     hud = MagicMock()

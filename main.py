@@ -76,8 +76,29 @@ def _default_state_dir() -> str:
     return os.path.join(os.path.expanduser("~"), ".voicedesk")
 
 
+def _project_config_path() -> str | None:
+    """In a dev run (`python3 main.py` from the repo checkout), prefer the
+    repo's own config.yaml over the per-user copy in STATE_DIR — otherwise
+    edits to it silently do nothing: the first run seeds STATE_DIR's
+    config.yaml from Config() defaults, and every run after that reads and
+    (via the Settings UI) writes that copy instead, never the repo file.
+
+    The packaged .app (py2app sets sys.frozen) always keeps using STATE_DIR:
+    its bundled config.yaml lives inside the app bundle, which must stay
+    read-only/untouched (settings belong in Application Support, not in a
+    signed bundle)."""
+    if getattr(sys, "frozen", False):
+        return None
+    candidate = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
+    return candidate if os.path.exists(candidate) else None
+
+
 STATE_DIR = _default_state_dir()
-CONFIG_PATH = os.environ.get("VOICEDESK_CONFIG", os.path.join(STATE_DIR, "config.yaml"))
+CONFIG_PATH = (
+    os.environ.get("VOICEDESK_CONFIG")
+    or _project_config_path()
+    or os.path.join(STATE_DIR, "config.yaml")
+)
 DB_PATH = os.environ.get("VOICEDESK_DB", os.path.join(STATE_DIR, "command_history.db"))
 ROUTINES_PATH = os.environ.get("VOICEDESK_ROUTINES", os.path.join(STATE_DIR, "routines.json"))
 

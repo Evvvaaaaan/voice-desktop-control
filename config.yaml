@@ -10,7 +10,7 @@ llm:
   openai_api_key: ""
   openai_model: gpt-4o
   ollama_url: http://localhost:11434
-  ollama_model: llama3
+  ollama_model: gemma4:e4b
   nvidia_api_key: ""
   nvidia_model: minimaxai/minimax-m3
 
