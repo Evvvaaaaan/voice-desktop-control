@@ -400,6 +400,22 @@ def test_click_missing_coords_errors(mocker):
     assert tools.dispatch("move_mouse", {"x": 5}).startswith("error")
 
 
+def test_computer_use_actions_are_logged(mocker, capsys):
+    """Clicks and text input must show up in the console log so what the
+    computer-use loop actually did on screen is visible/auditable."""
+    from agent import tools
+    mocker.patch("agent.tools.active_screen_rect", return_value=(0.0, 0.0, 1000.0, 1000.0))
+    mocker.patch("agent.tools.click")
+    mocker.patch("agent.tools.type_text")
+
+    tools.dispatch("click", {"x": 500, "y": 250})
+    tools.dispatch("type_text", {"text": "안녕하세요"})
+
+    err = capsys.readouterr().err
+    assert "[ComputerUse] Clicked at 500,250" in err
+    assert "[ComputerUse] Typed: '안녕하세요'" in err
+
+
 def test_loop_without_done_speaks_fallback(mocker):
     """A command the model never marks done must not end in silence."""
     mock_llm = MagicMock()
@@ -749,6 +765,30 @@ def test_agent_memory_hooks_record_action_and_conversation(mocker):
     assert cmd_args[1] is True
     conv_args = mock_memory.log_conversation.call_args.args
     assert conv_args == ("사파리 열어줘", "열었어요")
+
+
+def test_agent_memory_logs_click_and_type_text_targets(mocker):
+    """click/type_text carry no app/url/key/name, so the behavior log's
+    target must fall back to coordinates / typed text instead of being
+    blank — otherwise computer-use actions are invisible in the log."""
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.side_effect = [
+        '{"action": "click", "params": {"x": 500, "y": 250}, "done": false, "response": "클릭 중"}',
+        '{"action": "type_text", "params": {"text": "안녕"}, "done": true, "response": "입력했어요"}',
+    ]
+    mock_memory = MagicMock()
+    agent = _make_agent(mock_llm)
+    agent._memory = mock_memory
+    mocker.patch("agent.core.tools.dispatch", return_value="ok")
+    mocker.patch("agent.core.take_screenshot_with_grid", return_value=b"png")
+    mocker.patch("agent.core.run_applescript", return_value="")
+    mocker.patch("agent.core.speak")
+
+    agent.run("클릭하고 입력해줘")
+
+    targets = [c.args[2] for c in mock_memory.log_action.call_args_list]
+    assert targets == ["500,250", "안녕"]
 
 
 def test_agent_memory_failure_never_breaks_command(mocker):

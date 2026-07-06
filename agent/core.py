@@ -95,8 +95,13 @@ class Agent:
         if self._memory is None:
             return
         try:
-            target = str(params.get("app") or params.get("url")
-                         or params.get("key") or params.get("name") or "")
+            if action in ("click", "double_click", "move_mouse"):
+                target = f"{params.get('x')},{params.get('y')}"
+            elif action == "type_text":
+                target = str(params.get("text") or "")
+            else:
+                target = str(params.get("app") or params.get("url")
+                             or params.get("key") or params.get("name") or "")
             self._memory.log_action(
                 command, action, target,
                 not (isinstance(dispatch_res, str) and dispatch_res.startswith("error")),

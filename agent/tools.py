@@ -1,5 +1,6 @@
 import re
 import os
+import sys
 from urllib.parse import urlsplit, urlunsplit, quote, parse_qsl, urlencode
 from actions.applescript import run_applescript
 from actions.mouse_keyboard import (
@@ -90,18 +91,21 @@ def dispatch(action: str, params: dict) -> str:
         if pt is None:
             return "error: click requires params x and y"
         click(*pt)
+        print(f"[ComputerUse] Clicked at {pt[0]},{pt[1]}", file=sys.stderr)
         return f"clicked at {pt[0]},{pt[1]}"
     elif action == "double_click":
         pt = _to_logical(params)
         if pt is None:
             return "error: double_click requires params x and y"
         double_click(*pt)
+        print(f"[ComputerUse] Double-clicked at {pt[0]},{pt[1]}", file=sys.stderr)
         return f"double_clicked at {pt[0]},{pt[1]}"
     elif action == "move_mouse":
         pt = _to_logical(params)
         if pt is None:
             return "error: move_mouse requires params x and y"
         move_mouse(*pt)
+        print(f"[ComputerUse] Moved mouse to {pt[0]},{pt[1]}", file=sys.stderr)
         return f"moved to {pt[0]},{pt[1]}"
     elif action == "type_text":
         text = params.get("text")
@@ -115,17 +119,22 @@ def dispatch(action: str, params: dict) -> str:
                 return "error: 사용자가 텍스트 입력을 취소했습니다"
             text = confirmed
         type_text(text)
+        print(f"[ComputerUse] Typed: {text!r}", file=sys.stderr)
         return "typed"
     elif action == "press_key":
         key = params.get("key")
         if not key:
             return "error: press_key requires param key"
         press_key(key)
+        print(f"[ComputerUse] Pressed key: {key}", file=sys.stderr)
         return "pressed"
     elif action == "scroll":
         # Position is optional; scroll at the current pointer if not given.
         pt = _to_logical(params) or (0, 0)
-        scroll(pt[0], pt[1], params.get("direction", "down"), params.get("amount", 3))
+        direction = params.get("direction", "down")
+        amount = params.get("amount", 3)
+        scroll(pt[0], pt[1], direction, amount)
+        print(f"[ComputerUse] Scrolled {direction} x{amount} at {pt[0]},{pt[1]}", file=sys.stderr)
         return "scrolled"
     elif action == "run_applescript":
         script = params.get("script")
