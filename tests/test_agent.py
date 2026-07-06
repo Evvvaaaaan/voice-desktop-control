@@ -202,6 +202,49 @@ def test_agent_vision_provider_feeds_screenshot(mocker):
     mock_llm.build_observation.assert_called_once()
 
 
+def test_non_vision_provider_click_rejected_without_moving_mouse(mocker):
+    """Observed with Ollama/llama3: a non-vision model has no screenshot to
+    read coordinates off, so click/move_mouse are pure guesses — it
+    "clicked the left edge" and "moved to the top edge" of nothing, then
+    claimed done. The action must be rejected before the real mouse moves,
+    and done=true must not go through on that rejected step."""
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.side_effect = [
+        '{"action": "click", "params": {"x": 0, "y": 0}, "done": true, "response": "클릭했어요"}',
+        '{"action": "speak_only", "params": {}, "done": true, "response": "화면을 볼 수 없어서 못했어요"}',
+    ]
+    agent = _make_agent(mock_llm)
+    mock_click = mocker.patch("agent.tools.click")
+    mocker.patch("agent.core.speak")
+
+    result = agent.run("왼쪽 위 눌러줘")
+
+    mock_click.assert_not_called()
+    assert result == "화면을 볼 수 없어서 못했어요"
+
+
+def test_vision_provider_click_still_dispatches(mocker):
+    """The guard must only block non-vision providers — a vision-capable
+    one (which actually gets a screenshot) clicks normally."""
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = True
+    mock_llm.build_observation.return_value = {"role": "user", "content": "obs"}
+    mock_llm.complete.return_value = (
+        '{"action": "click", "params": {"x": 500, "y": 500}, "done": true, "response": "클릭했어요"}'
+    )
+    agent = _make_agent(mock_llm)
+    mocker.patch("agent.core.take_screenshot_with_grid", return_value=b"png")
+    mock_click = mocker.patch("agent.tools.click")
+    mocker.patch("agent.tools.active_screen_rect", return_value=(0.0, 0.0, 1000.0, 1000.0))
+    mocker.patch("agent.core.speak")
+
+    result = agent.run("가운데 클릭해줘")
+
+    mock_click.assert_called_once()
+    assert result == "클릭했어요"
+
+
 def test_agent_set_llm_replaces_runtime_adapter():
     old_llm = MagicMock()
     new_llm = MagicMock()

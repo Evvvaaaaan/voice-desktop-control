@@ -51,6 +51,11 @@ Rules:
    element and interpolate between their labels. This is far more accurate
    than guessing a fraction of the screen. If you have not seen the screen
    yet, take a "screenshot" action first (done=false).
+   IMPORTANT: click/double_click/move_mouse ONLY work if you are actually
+   shown screenshots. If your observations never include one, you have no
+   way to know what's on screen — DO NOT guess coordinates. Use launch_app,
+   open_url, type_text, press_key, or run_applescript instead, or give up
+   honestly with speak_only rather than clicking blind.
 7. PRECISION CLICKING: small or closely-packed targets (icons, tabs, X close
    buttons) are easy to misjudge by grid alone. For anything you're not
    confident about, do move_mouse first (done=false) — the next screenshot

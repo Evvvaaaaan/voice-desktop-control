@@ -16,6 +16,12 @@ from actions.screen import take_screenshot_with_grid
 # Computer-use tasks need room to screenshot → click → verify → correct.
 MAX_ITERATIONS = 8
 
+# These require seeing the screen to pick a meaningful (x, y) — without a
+# screenshot the model is just guessing coordinates. scroll is exempt: x/y
+# are optional there (defaults to the current pointer position), so it works
+# fine blind (e.g. "scroll down").
+_VISION_ONLY_ACTIONS = {"click", "double_click", "move_mouse"}
+
 # Reasoning models (e.g. DeepSeek-style) prepend a chain-of-thought block
 # before the actual answer. Cap how many times we ask one to reformat as
 # JSON before giving up, so a model that never complies can't burn the
@@ -269,8 +275,24 @@ class Agent:
             if dangerous:
                 self._set_state("executing")
 
-            print(f"[Agent] Dispatching action '{action}' with {params}...", file=sys.stderr)
-            dispatch_res = tools.dispatch(action, params)
+            if action in _VISION_ONLY_ACTIONS and not getattr(self._llm, "supports_vision", False):
+                # Without a screenshot this model has no way to know what's
+                # on screen — the "0..1000 grid" coordinates it just supplied
+                # are pure guesses (observed with Ollama/llama3: it "clicked
+                # the left edge" and "moved to the top edge" of nothing in
+                # particular, then claimed done). Reject before ever moving
+                # the real mouse, and let the model try a non-visual approach.
+                dispatch_res = (
+                    f"error: {action} requires a vision-capable LLM provider "
+                    "(screenshots aren't available with this one) — use "
+                    "keyboard shortcuts, AppleScript, launch_app/open_url "
+                    "instead, or tell the user honestly that this needs a "
+                    "vision-capable provider (Claude/OpenAI)."
+                )
+                print(f"[Agent] Blocked '{action}': current LLM has no vision support", file=sys.stderr)
+            else:
+                print(f"[Agent] Dispatching action '{action}' with {params}...", file=sys.stderr)
+                dispatch_res = tools.dispatch(action, params)
             last_dispatch = dispatch_res
             print(f"[Agent] Dispatch result: '{dispatch_res}'", file=sys.stderr)
             self._log_action(command, action, params, dispatch_res)
