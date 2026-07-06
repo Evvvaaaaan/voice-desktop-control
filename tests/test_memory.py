@@ -179,6 +179,23 @@ def test_ollama_embedder_success(mocker):
     assert emb.embed(["a", "b"]) == [[0.1, 0.2], [0.1, 0.2]]
 
 
+def test_ollama_embedder_missing_model_logs_actionable_hint(mocker, capsys):
+    """A bare '404 Client Error: Not Found' gives no clue the fix is a single
+    `ollama pull` — the single biggest reason vector-based memory search
+    silently never contributes to a response (the chat model gets pulled,
+    the separate embedding model doesn't)."""
+    resp = MagicMock(status_code=404)
+    resp.json.return_value = {"error": "model 'nomic-embed-text' not found, try pulling it first"}
+    mocker.patch("memory.embedder.requests.post", return_value=resp)
+    emb = OllamaEmbedder("http://localhost:11434", "nomic-embed-text")
+
+    result = emb.embed(["hello"])
+
+    assert result is None
+    err = capsys.readouterr().err
+    assert "ollama pull nomic-embed-text" in err
+
+
 # ---------- Patterns ----------
 
 def test_compute_patterns_empty(store):

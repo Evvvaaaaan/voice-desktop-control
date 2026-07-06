@@ -52,6 +52,25 @@ class OllamaEmbedder(Embedder):
                     json={"model": self.model, "prompt": text},
                     timeout=10,
                 )
+                if resp.status_code == 404:
+                    # A bare "404 Not Found" (the default log line below)
+                    # gives no clue that the fix is a single `ollama pull` —
+                    # this is the single biggest reason vector-based memory
+                    # search ("관련 기억") silently never contributes to a
+                    # response: the chat model gets pulled, the SEPARATE
+                    # embedding model doesn't.
+                    try:
+                        err_msg = resp.json().get("error", "")
+                    except ValueError:
+                        err_msg = ""
+                    if "not found" in err_msg.lower():
+                        print(
+                            f"[Memory] Ollama 임베딩 모델 '{self.model}'이 설치되어 있지 않아 "
+                            "과거 기록 기반 검색을 사용할 수 없습니다. 터미널에서 "
+                            f"'ollama pull {self.model}' 실행 후 다시 시도하세요.",
+                            file=sys.stderr,
+                        )
+                        return None
                 resp.raise_for_status()
                 out.append(resp.json()["embedding"])
             return out
