@@ -1,5 +1,6 @@
 import re
 import os
+from urllib.parse import urlsplit, urlunsplit, quote, parse_qsl, urlencode
 from actions.applescript import run_applescript
 from actions.mouse_keyboard import (
     click, double_click, move_mouse, type_text, press_key, scroll,
@@ -10,6 +11,19 @@ _SAFE_APP_NAME = re.compile(r'^[A-Za-z0-9가-힣 ._-]+$')
 # Only http(s) URLs, and no characters that could break out of the quoted
 # AppleScript string ("  '  \  <  >  and whitespace).
 _SAFE_URL = re.compile(r'^https?://[^\s"\'\\<>]+$')
+
+
+def _percent_encode_url(url: str) -> str:
+    """AppleScript's `open location` (the generic, no-app-specified path)
+    mangles raw non-ASCII bytes into mojibake — e.g. a Korean search query
+    comes out as garbage in the browser's address bar. Percent-encoding the
+    path/query/fragment to plain ASCII before it ever reaches osascript
+    sidesteps that entirely."""
+    parts = urlsplit(url)
+    path = quote(parts.path, safe="/%")
+    query = urlencode(parse_qsl(parts.query, keep_blank_values=True))
+    fragment = quote(parts.fragment, safe="%")
+    return urlunsplit((parts.scheme, parts.netloc, path, query, fragment))
 
 # The vision model reports pointer targets in a resolution-independent
 # 0..1000 grid (top-left origin) so its coordinates survive screenshot
@@ -64,6 +78,7 @@ def dispatch(action: str, params: dict) -> str:
         url = str(params.get("url", "") or "")
         if not _SAFE_URL.match(url):
             return f"error: invalid url: {url}"
+        url = _percent_encode_url(url)
         browser = str(params.get("browser", "") or "")
         if browser:
             if not _SAFE_APP_NAME.match(browser):

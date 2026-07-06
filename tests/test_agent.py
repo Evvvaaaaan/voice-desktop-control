@@ -100,6 +100,17 @@ def test_dispatch_open_url_valid(mocker):
     assert "https://www.google.com/search?q=gmail" in mock_run.call_args[0][0]
 
 
+def test_dispatch_open_url_percent_encodes_non_ascii_query(mocker):
+    """AppleScript's `open location` mangles raw Korean bytes into mojibake
+    (reproduced manually via osascript) — the query must be percent-encoded
+    to plain ASCII before it reaches osascript."""
+    mock_run = mocker.patch("agent.tools.run_applescript", return_value="")
+    dispatch("open_url", {"url": "https://www.google.com/search?q=클로드+코드"})
+    called_script = mock_run.call_args[0][0]
+    assert "클로드" not in called_script
+    assert "%ED%81%B4%EB%A1%9C%EB%93%9C" in called_script
+
+
 def test_dispatch_open_url_rejects_non_http():
     result = dispatch("open_url", {"url": "file:///etc/passwd"})
     assert result.startswith("error: invalid url")
