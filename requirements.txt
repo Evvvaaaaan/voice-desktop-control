@@ -14,6 +14,7 @@ pyobjc-core>=10.0
 pyobjc-framework-Cocoa>=10.0
 pyobjc-framework-Quartz>=10.0
 pyobjc-framework-AVFoundation>=10.0
+pyobjc-framework-Speech>=10.0
 pyyaml>=6.0.0
 pytest>=8.0.0
 pytest-mock>=3.12.0

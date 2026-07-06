@@ -16,18 +16,72 @@ def test_get_adapter_returns_base(default_config_dict, tmp_path):
 
 
 def test_macos_adapter_calls_speech_recognition():
+    """Outside a bundle with NSSpeechRecognitionUsageDescription (e.g. plain
+    `python3 main.py`, or here in pytest), the adapter must not touch the
+    Speech framework and instead falls back to Google Web Speech."""
     from stt.macos_speech import MacOSSpeechAdapter
     adapter = MacOSSpeechAdapter()
-    
+
     with patch("speech_recognition.Recognizer") as mock_rec_cls, \
          patch("speech_recognition.AudioFile") as mock_audio_cls:
-         
+
         mock_rec = mock_rec_cls.return_value
         mock_rec.recognize_google.return_value = "카카오 열어줘"
-        
+
         result = adapter.transcribe(b"fake_audio")
-        
+
     assert result == "카카오 열어줘"
+
+
+def test_macos_adapter_uses_native_speech_framework_when_bundled(mocker):
+    """Inside the packaged .app, the bundle's Info.plist declares
+    NSSpeechRecognitionUsageDescription, so the adapter must use the native
+    on-device SFSpeechRecognizer instead of calling out to Google."""
+    from stt import macos_speech
+
+    mocker.patch.object(macos_speech, "_bundle_has_speech_usage_description", return_value=True)
+    mock_recognizer_cls = mocker.patch.object(macos_speech, "SFSpeechRecognizer")
+    mocker.patch.object(macos_speech, "SFSpeechRecognizerAuthorizationStatusAuthorized", "authorized")
+    mocker.patch.object(macos_speech, "NSLocale")
+    mocker.patch.object(macos_speech, "NSURL")
+    mock_request_cls = mocker.patch.object(macos_speech, "SFSpeechURLRecognitionRequest")
+
+    mock_recognizer_cls.authorizationStatus.return_value = "authorized"
+    mock_recognizer = mock_recognizer_cls.alloc.return_value.initWithLocale_.return_value
+    mock_recognizer.isAvailable.return_value = True
+    mock_recognizer.supportsOnDeviceRecognition.return_value = True
+
+    mock_result = MagicMock()
+    mock_result.isFinal.return_value = True
+    mock_result.bestTranscription.return_value.formattedString.return_value = "카카오 열어줘"
+
+    def _fake_task(request, handler):
+        handler(mock_result, None)
+
+    mock_recognizer.recognitionTaskWithRequest_resultHandler_.side_effect = _fake_task
+
+    adapter = macos_speech.MacOSSpeechAdapter()
+    adapter._auth_status = None
+    result = adapter.transcribe(b"fake_audio")
+
+    assert result == "카카오 열어줘"
+    mock_request_cls.alloc.return_value.initWithURL_.return_value.setRequiresOnDeviceRecognition_.assert_called_once_with(True)
+
+
+def test_macos_adapter_falls_back_when_speech_framework_missing(mocker):
+    """pyobjc-framework-Speech may not be importable even when bundled —
+    must degrade to the Google fallback rather than raising."""
+    from stt import macos_speech
+
+    mocker.patch.object(macos_speech, "SFSpeechRecognizer", None)
+    mocker.patch.object(macos_speech, "_bundle_has_speech_usage_description", return_value=True)
+
+    with patch("speech_recognition.Recognizer") as mock_rec_cls, \
+         patch("speech_recognition.AudioFile"):
+        mock_rec_cls.return_value.recognize_google.return_value = "음악 틀어줘"
+        result = macos_speech.MacOSSpeechAdapter().transcribe(b"fake_audio")
+
+    assert result == "음악 틀어줘"
 
 
 def test_whisper_api_adapter(mocker):
