@@ -450,6 +450,37 @@ def test_click_maps_onto_external_display_with_negative_origin(mocker):
     assert x == -960 and y == 540          # center of the external display
 
 
+def test_click_maps_against_last_screenshot_rect_not_a_fresh_lookup(mocker):
+    """Mac-specific multi-monitor bug: re-resolving "the active display" at
+    click time can disagree with what was resolved for the screenshot the
+    model actually saw (frontmost app/focus can shift between the two, or
+    the region capture can silently fall back to the main display — see
+    actions/screen.py's last_capture_rect). The click must land where the
+    screenshot said it would, not wherever active_screen_rect() thinks is
+    active right now."""
+    from agent import tools
+    mocker.patch("agent.tools.active_screen_rect",
+                 return_value=(0.0, 0.0, 2560.0, 1440.0))          # "now" — wrong
+    mocker.patch("agent.tools.last_capture_rect",
+                 return_value=(-1920.0, 0.0, 1920.0, 1080.0))      # what was shown
+    mock_click = mocker.patch("agent.tools.click")
+    tools.dispatch("click", {"x": 500, "y": 500})
+    x, y = mock_click.call_args.args
+    assert x == -960 and y == 540
+
+
+def test_click_falls_back_to_active_screen_rect_without_prior_screenshot(mocker):
+    """No screenshot has been taken yet (last_capture_rect() is None) — must
+    still work by falling back to a fresh active_screen_rect() lookup."""
+    from agent import tools
+    mocker.patch("agent.tools.active_screen_rect",
+                 return_value=(0.0, 0.0, 1000.0, 1000.0))
+    mocker.patch("agent.tools.last_capture_rect", return_value=None)
+    mock_click = mocker.patch("agent.tools.click")
+    tools.dispatch("click", {"x": 500, "y": 500})
+    mock_click.assert_called_once_with(500, 500)
+
+
 # ---------------------------------------------------------------------------
 # Long text routes through the notch input
 # ---------------------------------------------------------------------------

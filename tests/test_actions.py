@@ -168,6 +168,37 @@ def test_take_screenshot_captures_active_display_and_downscales(mocker):
     assert cmds[1][0] == "sips"
 
 
+def test_last_capture_rect_matches_active_display_on_success(mocker):
+    """After a successful region capture, click dispatch must map against
+    the SAME rect that was actually captured/shown, not a freshly re-resolved
+    active_screen_rect() — see agent/tools.py's _to_logical."""
+    mocker.patch("actions.screen.subprocess.run",
+                 return_value=MagicMock(returncode=0))
+    mocker.patch("actions.screen.os.path.getsize", return_value=1000)
+    mocker.patch("actions.screen.active_screen_rect",
+                 return_value=(-1920.0, 0.0, 1920.0, 1080.0))
+    import actions.screen as screen
+    screen._capture_active_display_png("/tmp/x.png")
+    assert screen.last_capture_rect() == (-1920.0, 0.0, 1920.0, 1080.0)
+
+
+def test_last_capture_rect_falls_back_to_main_display_when_region_capture_fails(mocker):
+    """A region capture can fail outright (observed with a negative-origin
+    region for an external monitor) — screencapture then silently falls back
+    to capturing the MAIN display instead. last_capture_rect() must reflect
+    what was ACTUALLY captured, not the external-monitor rect that was
+    requested, or clicks get mapped onto the wrong display's coordinates."""
+    mocker.patch("actions.screen.subprocess.run",
+                 return_value=MagicMock(returncode=1))   # region capture fails
+    mocker.patch("actions.screen.active_screen_rect",
+                 return_value=(-1920.0, 0.0, 1920.0, 1080.0))
+    mocker.patch("actions.screen._main_display_rect",
+                 return_value=(0.0, 0.0, 2560.0, 1440.0))
+    import actions.screen as screen
+    screen._capture_active_display_png("/tmp/x.png")
+    assert screen.last_capture_rect() == (0.0, 0.0, 2560.0, 1440.0)
+
+
 def test_move_mouse_glides(mocker):
     mock_pg = mocker.patch("actions.mouse_keyboard.pyautogui")
     from actions.mouse_keyboard import move_mouse

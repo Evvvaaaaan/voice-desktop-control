@@ -6,7 +6,7 @@ from actions.applescript import run_applescript
 from actions.mouse_keyboard import (
     click, double_click, move_mouse, type_text, press_key, scroll,
 )
-from actions.screen import take_screenshot_with_grid, active_screen_rect
+from actions.screen import take_screenshot_with_grid, active_screen_rect, last_capture_rect
 
 _SAFE_APP_NAME = re.compile(r'^[A-Za-z0-9가-힣 ._-]+$')
 # Only http(s) URLs, and no characters that could break out of the quoted
@@ -44,9 +44,18 @@ def set_text_input_provider(provider) -> None:
 
 
 def _to_logical(params):
-    """Map normalized (0..1000) x/y to global screen points on the ACTIVE
-    display — the one the screenshot was taken of. Global coordinates may be
-    negative on multi-display setups (screens left of / above the main one).
+    """Map normalized (0..1000) x/y to global screen points on the display
+    the last screenshot actually captured. Global coordinates may be negative
+    on multi-display setups (screens left of / above the main one).
+
+    Uses last_capture_rect() rather than a fresh active_screen_rect() call:
+    on a multi-monitor Mac, re-resolving "the active display" at click time
+    can disagree with what was resolved at screenshot time (a focus change
+    mid-turn, or a region-capture failure that silently fell back to the
+    main display — see _capture_active_display_png) and send the click to a
+    different display than the one the model was actually shown. Falls back
+    to active_screen_rect() only if no screenshot has been taken yet.
+
     Clamped just inside that display so a stray corner value never trips
     pyautogui's failsafe. Returns (x, y) or None if a coordinate is missing."""
     raw_x, raw_y = params.get("x"), params.get("y")
@@ -56,7 +65,7 @@ def _to_logical(params):
         nx, ny = float(raw_x), float(raw_y)
     except (TypeError, ValueError):
         return None
-    rx, ry, rw, rh = active_screen_rect()
+    rx, ry, rw, rh = last_capture_rect() or active_screen_rect()
     x = rx + nx / _COORD_SCALE * rw
     y = ry + ny / _COORD_SCALE * rh
     x = max(rx + 1, min(rx + rw - 2, x))
