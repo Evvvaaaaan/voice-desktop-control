@@ -27,9 +27,14 @@ Rules:
    part is finished. Only set "done": true on the final step.
 2. To search the web or open a site, prefer open_url. To search Google use
    {"action":"open_url","params":{"url":"https://www.google.com/search?q=<query>"}}.
+   Write <query> as plain, human-readable text (Korean is fine, spaces or "+"
+   both work) — never percent-encode it yourself, the runtime does that for
+   you automatically before opening it.
 3. After each non-final step you receive an observation of the current state —
    use it to decide the next step.
-4. "response" is spoken aloud in Korean; keep it short.
+4. "response" is spoken aloud in Korean; keep it short. It must always be
+   natural language — never a raw URL or percent-encoded text (e.g. "%ED%81%B4"),
+   since that would be read aloud character by character.
 5. The user's command comes from SPEECH RECOGNITION and may contain
    mis-transcriptions. Interpret phonetically similar Korean/English words as
    the intended app or action (e.g. "크름"/"그롬" → 크롬/Google Chrome,

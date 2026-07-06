@@ -635,6 +635,27 @@ def test_orphan_closing_think_tag_stripped(mocker):
     assert result == "사파리를 열었습니다"
 
 
+def test_percent_encoded_response_decoded_before_speaking(mocker):
+    """Some models copy a URL's percent-encoded query straight into the
+    spoken "response" field instead of natural language — TTS would read it
+    out character by character (e.g. "퍼센트 이디..."), so it must be decoded
+    back to readable text before it reaches speak()."""
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.return_value = (
+        '{"action": "open_url", "params": {"url": "https://www.google.com/search?q=클로드"}, '
+        '"done": true, "response": "%ED%81%B4%EB%A1%9C%EB%93%9C 검색 결과를 열었어요"}'
+    )
+    agent = _make_agent(mock_llm)
+    mocker.patch("agent.core.tools.dispatch", return_value="ok")
+    mock_speak = mocker.patch("agent.core.speak")
+
+    result = agent.run("클로드 검색해줘")
+
+    assert result == "클로드 검색 결과를 열었어요"
+    mock_speak.assert_called_once_with("클로드 검색 결과를 열었어요", "Yuna", 200)
+
+
 def test_invalid_json_retried_then_recovers(mocker):
     """A malformed first reply (no JSON at all) must trigger a corrective
     re-prompt rather than being spoken verbatim; a valid reply on retry

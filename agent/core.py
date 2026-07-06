@@ -1,6 +1,7 @@
 import json
 import re
 import time
+from urllib.parse import unquote
 from llm.base import LLMBase
 from safety.guard import SafetyGuard
 from metrics.collector import MetricsCollector
@@ -36,6 +37,20 @@ def _strip_think(raw: str) -> str:
     if "</think>" in cleaned:
         cleaned = cleaned.split("</think>", 1)[1]
     return cleaned
+
+
+_PERCENT_ENCODED_RUN_RE = re.compile(r'(?:%[0-9A-Fa-f]{2}){3,}')
+
+
+def _decode_stray_percent_encoding(text: str) -> str:
+    """Some models copy a URL's percent-encoded query straight into the
+    spoken "response" instead of writing natural language, which TTS then
+    reads out character by character (e.g. "퍼센트 이디..."). Runs of 3+
+    %XX groups are decoded back to the original text; a stray "%" in normal
+    prose (e.g. "50% 할인") never matches this pattern."""
+    return _PERCENT_ENCODED_RUN_RE.sub(
+        lambda m: unquote(m.group(0)), text
+    )
 
 
 class Agent:
@@ -231,7 +246,7 @@ class Agent:
             action = parsed.get("action", "speak_only")
             params = parsed.get("params", {})
             done = parsed.get("done", False)
-            response_text = parsed.get("response", "")
+            response_text = _decode_stray_percent_encoding(parsed.get("response", ""))
             print(f"[Agent] Parsed: Action='{action}', Params={params}, Done={done}, Response='{response_text}'", file=sys.stderr)
 
             dangerous = self._guard.is_dangerous(action, params)
