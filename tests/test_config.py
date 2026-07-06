@@ -29,9 +29,6 @@ def test_missing_optional_keys(tmp_path):
     assert config.llm.claude_model == "claude-sonnet-4-6"
     assert config.llm.nvidia_model == "deepseek-ai/deepseek-v4-pro"
     assert config.llm.nvidia_api_key == ""
-    assert config.tts.provider == "macos"
-    assert config.tts.nvidia_voice == "Chatterbox-Multilingual.ko-KR.Male"
-    assert config.tts.nvidia_language_code == "ko-KR"
 
 
 def test_nvidia_provider_roundtrip(default_config_dict, tmp_path):
@@ -44,20 +41,6 @@ def test_nvidia_provider_roundtrip(default_config_dict, tmp_path):
     reloaded = load_config(str(cfg_file))
     assert reloaded.llm.provider == "nvidia"
     assert reloaded.llm.nvidia_api_key == "nvapi-test"
-
-
-def test_nvidia_tts_provider_roundtrip(default_config_dict, tmp_path):
-    cfg_file = tmp_path / "config.yaml"
-    cfg_file.write_text(yaml.dump(default_config_dict))
-    config = load_config(str(cfg_file))
-    config.tts.provider = "nvidia"
-    config.tts.nvidia_api_key = "nvapi-tts-test"
-    config.tts.nvidia_function_id = "func-id-123"
-    save_config(config, str(cfg_file))
-    reloaded = load_config(str(cfg_file))
-    assert reloaded.tts.provider == "nvidia"
-    assert reloaded.tts.nvidia_api_key == "nvapi-tts-test"
-    assert reloaded.tts.nvidia_function_id == "func-id-123"
 
 
 def test_hud_config_defaults_and_roundtrip(tmp_path):

@@ -111,21 +111,16 @@ llm:
 | OpenAI GPT-4o | 비전 지원 | `provider: openai`, `openai_api_key` |
 | Ollama (로컬) | 완전 무료·오프라인 | `provider: ollama` — `brew install ollama && ollama pull llama3 && ollama serve` 먼저 실행 |
 
-### TTS (음성 합성) — 선택: NVIDIA Chatterbox 또는 macOS 기본
+### TTS (음성 합성) — macOS 로컬 전용
 
 ```yaml
 tts:
-  provider: nvidia
-  nvidia_api_key: nvapi-...
-  nvidia_function_id: ...
-  nvidia_voice: Chatterbox-Multilingual.ko-KR.Male
-  nvidia_language_code: ko-KR
+  voice: Yuna
+  rate: 200
 ```
 
-- Function ID는 https://build.nvidia.com/resembleai/chatterbox-multilingual-tts 의 **Deploy** 탭에서
-  계정별로 확인합니다(공유 불가, 계정마다 다름).
-- 실패 시 자동으로 macOS 로컬 음성(`say`)으로 폴백되므로 무음이 되지는 않습니다.
-- `provider: macos`로 두면 완전 무료·오프라인(기본 음성 `Yuna`).
+완전 무료·오프라인으로 macOS 내장 `say` 명령을 사용합니다. `voice`는 `say -v ?`로 설치된
+음성 목록을 확인해 바꿀 수 있습니다.
 
 ### 변경 반영 시점
 
@@ -262,7 +257,6 @@ open dist/VoiceDesk.app
 | Ollama 연결 실패 | `ollama serve` 실행 여부 확인 |
 | Whisper 로컬 STT 느림 | `whisper_local_model: tiny` 또는 `base`로 낮추기 |
 | 화면 캡처 안 됨 | 화면 및 시스템 오디오 녹화 권한(§3) 확인 |
-| NVIDIA TTS가 계속 로컬 음성으로만 나옴 | `nvidia_function_id`가 틀렸거나 네트워크 문제 — 자동 폴백 중, Function ID 재확인 |
 | "Hey Jarvis"가 인식 안 됨 | 최초 실행 시 모델 자동 다운로드에 인터넷 필요 — 콘솔 다운로드 로그 확인 |
 | 노치 UI가 안 뜸 / `Swift HUD compile failed` | Xcode Command Line Tools 미설치 — `xcode-select --install` 후 재실행 |
 | 재생 중 음악이 위젯에 안 뜸 | Music/Spotify가 실행 중이어야 조회함(자동 실행 안 함) + 첫 조회 시 자동화 권한 팝업을 허용해야 함 |

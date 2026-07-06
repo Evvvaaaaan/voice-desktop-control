@@ -14,8 +14,9 @@
 - **다단계 ReAct 에이전트**: 한 번의 명령을 여러 단계로 나눠 수행 — 실행 결과를 관찰하고
   성공을 검증한 뒤에만 완료로 처리 (예: "크롬 열고 지메일 검색해줘")
 - **컴퓨터 유즈**: 비전 지원 LLM이 스크린샷을 보고 화면 속 버튼/링크를 실제 좌표로 클릭
-- **다중 STT/LLM/TTS 프로바이더**: Whisper(로컬/API), macOS 내장 STT / Claude, OpenAI, NVIDIA
-  NIM, Ollama / macOS 내장 음성, NVIDIA Chatterbox TTS — 설정에서 자유롭게 교체
+- **다중 STT/LLM 프로바이더**: Whisper(로컬/API), macOS 내장 STT / Claude, OpenAI, NVIDIA
+  NIM, Ollama — 설정에서 자유롭게 교체. TTS는 macOS 내장 음성(`say`)만 사용해 완전
+  무료·오프라인으로 동작
 - **안전 장치(SafetyGuard)**: 삭제·발송·결제 등 위험한 동작은 실행 전 확인을 요구하고,
   실패한 동작에 대해서는 완료(done)를 선언하지 못하도록 차단
 - **노치 HUD**: 상태(듣는 중/처리 중/성공/오류)를 보여주는 macOS 노치 스타일 위젯 (Swift)

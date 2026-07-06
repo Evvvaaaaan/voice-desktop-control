@@ -21,13 +21,8 @@ activation:
   hotkey_binding: "alt+space"
 
 tts:
-  provider: macos # macos | nvidia
   voice: Yuna
   rate: 200
-  nvidia_api_key: ""
-  nvidia_function_id: "877104f7-e885-42b9-8de8-f6e4c6303969"
-  nvidia_voice: Chatterbox-Multilingual.ko-KR.Male
-  nvidia_language_code: ko-KR
 
 safety:
   require_confirmation: true

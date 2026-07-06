@@ -164,11 +164,10 @@ class TestProviderInfo:
         cfg = Config()
         cfg.llm.provider = "claude"
         cfg.llm.claude_model = "claude-sonnet-4-6"
-        cfg.tts.provider = "nvidia"
-        cfg.tts.nvidia_voice = "Chatterbox-Multilingual.ko-KR.Male"
+        cfg.tts.voice = "Juna"
         assert _provider_info(cfg) == (
             "macos", "claude", "claude-sonnet-4-6",
-            "nvidia", "Chatterbox-Multilingual.ko-KR.Male",
+            "macos", "Juna",
         )
 
     def test_ollama_and_macos_defaults(self):

@@ -648,7 +648,7 @@ def test_invalid_json_retried_then_recovers(mocker):
         isinstance(m.get("content"), str) and "유효한 JSON이 아니었어요" in m["content"]
         for m in second_call_messages
     )
-    mock_speak.assert_called_once_with("사파리를 열었습니다", "Yuna", 200, tts_config=agent._tts)
+    mock_speak.assert_called_once_with("사파리를 열었습니다", "Yuna", 200)
 
 
 def test_persistently_invalid_json_falls_back_honestly(mocker):

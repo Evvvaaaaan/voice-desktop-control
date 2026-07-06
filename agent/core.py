@@ -154,9 +154,9 @@ class Agent:
             self._log_outcome(command, not failed, elapsed_ms)
             self._set_state("error" if failed else "success")
             if failed:
-                speak("저장된 명령 실행에 실패했어요.", self._tts.voice, self._tts.rate, tts_config=self._tts)
+                speak("저장된 명령 실행에 실패했어요.", self._tts.voice, self._tts.rate)
             else:
-                speak("완료했습니다.", self._tts.voice, self._tts.rate, tts_config=self._tts)
+                speak("완료했습니다.", self._tts.voice, self._tts.rate)
             self._collector.record(command, 0.99, not failed, 0, False, elapsed_ms, False)
             print(f"[Agent] Cache execution finished. Result: {result}", file=sys.stderr)
             return result
@@ -242,7 +242,7 @@ class Agent:
 
             if not self._guard.check(action, params):
                 print(f"[Agent] Action BLOCKED by Safety Guard: {action} with {params}", file=sys.stderr)
-                speak("작업을 취소했습니다.", self._tts.voice, self._tts.rate, tts_config=self._tts)
+                speak("작업을 취소했습니다.", self._tts.voice, self._tts.rate)
                 final_response = "취소됨"
                 break
 
@@ -307,8 +307,8 @@ class Agent:
         self._set_state("success" if success else "error")
 
         if final_response:
-            speak(final_response, self._tts.voice, self._tts.rate, tts_config=self._tts)
+            speak(final_response, self._tts.voice, self._tts.rate)
         if is_repeated:
-            speak("이 명령을 루틴으로 저장할까요?", self._tts.voice, self._tts.rate, tts_config=self._tts)
+            speak("이 명령을 루틴으로 저장할까요?", self._tts.voice, self._tts.rate)
 
         return final_response

@@ -176,8 +176,7 @@ def _provider_info(cfg):
         "openai": cfg.llm.openai_model,
         "nvidia": cfg.llm.nvidia_model,
     }.get(cfg.llm.provider, cfg.llm.ollama_model)
-    tts_voice = cfg.tts.nvidia_voice if cfg.tts.provider == "nvidia" else cfg.tts.voice
-    return (cfg.stt.provider, cfg.llm.provider, llm_model, cfg.tts.provider, tts_voice)
+    return (cfg.stt.provider, cfg.llm.provider, llm_model, "macos", cfg.tts.voice)
 
 
 def _ensure_data_dir():

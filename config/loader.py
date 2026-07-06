@@ -35,13 +35,8 @@ class ActivationConfig:
 
 @dataclass
 class TTSConfig:
-    provider: str = "macos"          # macos | nvidia
     voice: str = "Yuna"
     rate: int = 200
-    nvidia_api_key: str = ""
-    nvidia_function_id: str = ""
-    nvidia_voice: str = "Chatterbox-Multilingual.ko-KR.Male"
-    nvidia_language_code: str = "ko-KR"
 
 
 @dataclass
