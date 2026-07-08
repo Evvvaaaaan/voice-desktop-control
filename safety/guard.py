@@ -41,6 +41,7 @@ _DANGEROUS_SUBSTRINGS = re.compile(
 # Shared with the proactive-suggestion flow; the alias keeps this module's
 # patch seam (`safety.guard._listen_for_confirmation`) intact for tests.
 from stt.confirm import listen_for_confirmation as _listen_for_confirmation
+from stt.confirm import parse_yes_no
 
 
 class SafetyGuard:
@@ -74,9 +75,13 @@ class SafetyGuard:
 
         def _voice():
             try:
-                response = _listen_for_confirmation()
-                if response:
-                    decision.resolve("네" in response or "yes" in response.lower())
+                # A naive '"네" in response' here once approved the decline
+                # "아니요, 됐네요" — use the shared parser, and leave unclear
+                # answers unresolved so the HUD buttons/timeout decide (a
+                # timeout denies).
+                answer = parse_yes_no(_listen_for_confirmation())
+                if answer is not None:
+                    decision.resolve(answer)
             except Exception:
                 pass
 

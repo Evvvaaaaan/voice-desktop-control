@@ -183,6 +183,33 @@ def test_listen_failure_counts_as_timeout(store):
     assert outcome == "timeout"
 
 
+def test_delivery_crash_burns_cooldown_and_resets_hud(store):
+    """The 'ANY outcome burns the hourly budget' invariant must hold even when
+    delivery itself crashes (a broken speak_fn once did) — otherwise the same
+    suggestion re-fires every tick and the HUD stays stuck on the prompt."""
+    _seed_pattern(store)
+    engine = _make_engine(store)
+    engine._speak = MagicMock(side_effect=TypeError("stale kwarg"))
+
+    with pytest.raises(TypeError):
+        engine.tick(NOW)
+
+    engine._end_session.assert_called_once()
+    with store._conn() as conn:
+        rows = conn.execute(
+            "SELECT suggestion_key, outcome FROM suggestion_log").fetchall()
+    assert rows == [("크롬 열어줘", "error")]
+    states = [c.args[0] for c in engine._hud.set_state.call_args_list]
+    assert states[-1] == "idle"
+    transcripts = [c.args[0] for c in engine._hud.set_transcript.call_args_list]
+    assert transcripts[-1] == ""
+
+    # The crashed attempt burned the cooldown: no re-nag on the next tick.
+    _set_last_suggestion_ts(store, NOW)
+    engine._speak = MagicMock()
+    assert engine.tick(NOW.replace(minute=45)) is False
+
+
 @pytest.mark.parametrize("text,expected", [
     ("네", True),
     ("네, 해줘", True),
@@ -190,13 +217,21 @@ def test_listen_failure_counts_as_timeout(store):
     ("어", True),
     ("좋아", True),
     ("그래 해줘", True),
+    ("네네", True),
     ("아니", False),
     ("아니요, 됐네요", False),
     ("나중에 할게", False),
     ("하지 마", False),
+    ("안돼", False),
+    ("안 돼요", False),
+    ("괜찮아요", False),
+    ("싫은데", False),
     ("", None),
     ("글쎄", None),
     ("오늘 날씨 어때", None),
+    # '네'/'어' as syllables inside unrelated speech must not read as a yes.
+    ("네이버 켜줘", None),
+    ("어 잠깐만", None),
 ])
 def test_parse_answer(text, expected):
     assert _parse_answer(text) is expected

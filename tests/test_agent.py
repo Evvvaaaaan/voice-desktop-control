@@ -910,3 +910,101 @@ def test_agent_retriever_block_reaches_system_prompt(mocker):
     assert system["role"] == "system"
     assert "- name: 하민" in system["content"]
     mock_retriever.build_memory_block.assert_called_once_with("내 이름 뭐야")
+
+
+# ---------------------------------------------------------------------------
+# Routine-save offer (repeated command → voice yes/no → RoutineManager.save)
+# ---------------------------------------------------------------------------
+
+
+def _make_routine_agent(mock_llm, listen="네"):
+    mock_guard = MagicMock()
+    mock_guard.check.return_value = True
+    mock_guard.is_dangerous.return_value = False
+    mock_detector = MagicMock()
+    mock_detector.record.return_value = True  # threshold reached this run
+    mock_tts_cfg = MagicMock(voice="Yuna", rate=200)
+    routines = MagicMock()
+    agent = Agent(mock_llm, mock_guard, MagicMock(), mock_detector, mock_tts_cfg,
+                  routines=routines,
+                  listen_confirm=MagicMock(return_value=listen))
+    return agent, routines
+
+
+def _launch_app_llm():
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.return_value = (
+        '{"action": "launch_app", "params": {"app": "Safari"}, '
+        '"done": true, "response": "열었어요"}'
+    )
+    return mock_llm
+
+
+def test_repeated_command_accepted_saves_routine(mocker):
+    agent, routines = _make_routine_agent(_launch_app_llm(), listen="네")
+    mock_speak = mocker.patch("agent.core.speak")
+    mocker.patch("agent.core.run_applescript", return_value="")
+    mocker.patch("agent.core.tools.dispatch", return_value="ok")
+
+    agent.run("사파리 열어줘")
+
+    routines.save.assert_called_once_with(
+        "사파리 열어줘",
+        [{"action": "launch_app", "params": {"app": "Safari"}}],
+    )
+    spoken = [c.args[0] for c in mock_speak.call_args_list]
+    assert "이 명령을 루틴으로 저장할까요?" in spoken
+    assert "루틴으로 저장했어요." in spoken
+
+
+def test_repeated_command_declined_not_saved(mocker):
+    agent, routines = _make_routine_agent(_launch_app_llm(), listen="아니")
+    mocker.patch("agent.core.speak")
+    mocker.patch("agent.core.run_applescript", return_value="")
+    mocker.patch("agent.core.tools.dispatch", return_value="ok")
+
+    agent.run("사파리 열어줘")
+
+    routines.save.assert_not_called()
+
+
+def test_failed_command_never_offers_routine(mocker):
+    agent, routines = _make_routine_agent(_launch_app_llm(), listen="네")
+    mock_speak = mocker.patch("agent.core.speak")
+    mocker.patch("agent.core.run_applescript", return_value="")
+    mocker.patch("agent.core.tools.dispatch", return_value="error: app not found")
+
+    agent.run("사파리 열어줘")
+
+    routines.save.assert_not_called()
+    spoken = [c.args[0] for c in mock_speak.call_args_list]
+    assert "이 명령을 루틴으로 저장할까요?" not in spoken
+
+
+def test_dangerous_run_never_offers_routine(mocker):
+    """run_routine replays saved steps straight through tools.dispatch — no
+    SafetyGuard confirmation — so a run with a dangerous step must not become
+    a routine."""
+    agent, routines = _make_routine_agent(_launch_app_llm(), listen="네")
+    agent._guard.is_dangerous.return_value = True
+    mocker.patch("agent.core.speak")
+    mocker.patch("agent.core.run_applescript", return_value="")
+    mocker.patch("agent.core.tools.dispatch", return_value="ok")
+
+    agent.run("휴지통 비워줘")
+
+    routines.save.assert_not_called()
+
+
+def test_routine_offer_listen_failure_never_breaks_command(mocker):
+    agent, routines = _make_routine_agent(_launch_app_llm())
+    agent._listen_confirm = MagicMock(side_effect=RuntimeError("mic busy"))
+    mocker.patch("agent.core.speak")
+    mocker.patch("agent.core.run_applescript", return_value="")
+    mocker.patch("agent.core.tools.dispatch", return_value="ok")
+
+    result = agent.run("사파리 열어줘")
+
+    assert result == "열었어요"
+    routines.save.assert_not_called()

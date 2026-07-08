@@ -285,6 +285,37 @@ def test_summarizer_strips_think_block(store, db_path):
     assert store.get_recent_summaries()[0][1] == "요약본"
 
 
+def test_summarizer_loop_reruns_until_stopped(store):
+    """Patterns (and day rollovers) must refresh while the app stays up —
+    a single pass at launch would freeze hourly_commands for the suggester."""
+    summarizer = DailySummarizer(store, MagicMock(), None, refresh_interval_sec=0)
+    calls = []
+
+    def fake_run_pending():
+        calls.append(1)
+        if len(calls) == 2:
+            summarizer.stop()
+
+    summarizer.run_pending = fake_run_pending
+    summarizer._loop()  # returns because stop() fired on the second pass
+    assert len(calls) == 2
+
+
+def test_summarizer_loop_survives_a_failing_pass(store):
+    summarizer = DailySummarizer(store, MagicMock(), None, refresh_interval_sec=0)
+    calls = []
+
+    def fake_run_pending():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("llm down")
+        summarizer.stop()
+
+    summarizer.run_pending = fake_run_pending
+    summarizer._loop()  # first pass fails, loop keeps going
+    assert len(calls) == 2
+
+
 # ---------- MemoryRetriever ----------
 
 def test_retriever_profile_only_without_embedder(store):

@@ -12,6 +12,7 @@ from agent import tools
 from actions.tts import speak
 from actions.applescript import run_applescript
 from actions.screen import take_screenshot_with_grid
+from stt.confirm import listen_for_confirmation, parse_yes_no
 
 # Computer-use tasks need room to screenshot → click → verify → correct.
 MAX_ITERATIONS = 8
@@ -70,6 +71,8 @@ class Agent:
         on_state=None,
         memory=None,
         retriever=None,
+        routines=None,
+        listen_confirm=None,
     ):
         self._llm = llm
         self._guard = guard
@@ -79,6 +82,8 @@ class Agent:
         self._on_state = on_state
         self._memory = memory
         self._retriever = retriever
+        self._routines = routines
+        self._listen_confirm = listen_confirm or listen_for_confirmation
         self._cache = HotCommandCache()
         self._context = ConversationContext()
 
@@ -192,6 +197,10 @@ class Agent:
         params: dict = {}
         last_dispatch = ""
         json_retries = 0
+        # This run's successful real actions, in order — the replayable steps
+        # a saved routine would consist of.
+        executed_steps: list[dict] = []
+        had_dangerous = False
         # Maintain one running message list so each step remembers the original
         # command and the assistant's prior actions/observations.
         memory_block = None
@@ -264,6 +273,7 @@ class Agent:
             if dangerous:
                 print(f"[Agent] Action flagged as DANGEROUS: {action}", file=sys.stderr)
                 self._set_state("danger_confirm")
+                had_dangerous = True
                 retry += 1
 
             if not self._guard.check(action, params):
@@ -296,6 +306,8 @@ class Agent:
             last_dispatch = dispatch_res
             print(f"[Agent] Dispatch result: '{dispatch_res}'", file=sys.stderr)
             self._log_action(command, action, params, dispatch_res)
+            if action != "speak_only" and not dispatch_res.startswith("error"):
+                executed_steps.append({"action": action, "params": params})
 
             if done:
                 if dispatch_res.startswith("error"):
@@ -350,7 +362,29 @@ class Agent:
 
         if final_response:
             speak(final_response, self._tts.voice, self._tts.rate)
-        if is_repeated:
-            speak("이 명령을 루틴으로 저장할까요?", self._tts.voice, self._tts.rate)
+        # Only offer what can actually be replayed: the run must have
+        # succeeded with at least one real step, and none of them dangerous —
+        # run_routine replays steps straight through tools.dispatch, without
+        # the SafetyGuard confirmation this run went through.
+        if (is_repeated and success and executed_steps and not had_dangerous
+                and self._routines is not None):
+            self._offer_routine_save(command, executed_steps)
 
         return final_response
+
+    def _offer_routine_save(self, command: str, steps: list[dict]) -> None:
+        """Voice yes/no → persist this run's steps as a replayable routine
+        (listed in the HUD pinned panel, runnable via run_routine). Failures
+        here must never break the command that just succeeded; silence or an
+        unclear answer simply skips saving."""
+        import sys
+        try:
+            speak("이 명령을 루틴으로 저장할까요?", self._tts.voice, self._tts.rate)
+            answer = parse_yes_no(self._listen_confirm())
+            if answer is True:
+                self._routines.save(command, steps)
+                speak("루틴으로 저장했어요.", self._tts.voice, self._tts.rate)
+            elif answer is False:
+                speak("알겠어요.", self._tts.voice, self._tts.rate)
+        except Exception as e:
+            print(f"[Agent] routine-save offer failed: {e}", file=sys.stderr)

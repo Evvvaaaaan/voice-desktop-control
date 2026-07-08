@@ -3,28 +3,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 
 from memory.store import MemoryStore
-
-# Decline is checked FIRST: "아니요, 됐네요" contains "네".
-_DECLINE_WORDS = ("아니", "안 해", "안해", "싫어", "하지 마", "하지마",
-                  "나중에", "됐어", "no")
-_ACCEPT_WORDS = ("네", "예", "그래", "좋아", "해줘", "해 줘", "오케이",
-                 "yes", "ok")
-# Single syllables false-positive as substrings of almost anything — they
-# only count as an exact (stripped) answer.
-_ACCEPT_EXACT = ("어", "응", "예")
-
-
-def _parse_answer(text: str) -> bool | None:
-    """True = accept, False = decline, None = silence/unclear."""
-    cleaned = text.strip()
-    if not cleaned:
-        return None
-    lowered = cleaned.lower()
-    if any(w in lowered for w in _DECLINE_WORDS):
-        return False
-    if cleaned in _ACCEPT_EXACT or any(w in lowered for w in _ACCEPT_WORDS):
-        return True
-    return None
+from stt.confirm import parse_yes_no as _parse_answer
 
 
 class SuggestionEngine:
@@ -81,8 +60,18 @@ class SuggestionEngine:
         if not self._begin_session():
             return False
         try:
-            outcome = self._deliver(command)
-            self._store.log_suggestion(command, now.hour, outcome)
+            outcome = "error"
+            try:
+                outcome = self._deliver(command)
+            finally:
+                # A crash mid-delivery must still burn the cooldown —
+                # otherwise a persistent failure (e.g. a broken speak_fn)
+                # re-nags every tick — and must not leave the HUD stuck
+                # showing the prompt.
+                if outcome == "error":
+                    self._set_hud("set_transcript", "")
+                    self._set_hud("set_state", "idle")
+                self._store.log_suggestion(command, now.hour, outcome)
         finally:
             self._end_session()
         return True

@@ -41,22 +41,35 @@ class DailySummarizer:
     """Turns past days' logs into tier-3 summaries, tier-1 profile facts,
     tier-4 vectors, and refreshed tier-5 patterns."""
 
-    def __init__(self, store: MemoryStore, llm: LLMBase, embedder: Embedder | None):
+    def __init__(self, store: MemoryStore, llm: LLMBase, embedder: Embedder | None,
+                 refresh_interval_sec: float = 900):
         self._store = store
         self._llm = llm
         self._embedder = embedder
+        self._refresh_interval_sec = refresh_interval_sec
+        self._stop = threading.Event()
 
     def start_background(self) -> threading.Thread:
-        thread = threading.Thread(target=self._run_safe, daemon=True,
+        thread = threading.Thread(target=self._loop, daemon=True,
                                   name="voicedesk-memory-summarizer")
         thread.start()
         return thread
 
-    def _run_safe(self) -> None:
-        try:
-            self.run_pending()
-        except Exception as e:
-            print(f"[Memory] summarizer thread failed: {e}", file=sys.stderr)
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _loop(self) -> None:
+        # Re-run periodically, not just once at launch: a day rollover while
+        # the app stays up still gets summarized, and tier-5 patterns pick up
+        # commands run since launch — the suggestion engine reads those live,
+        # so a pattern frozen at startup would never surface new habits.
+        while True:
+            try:
+                self.run_pending()
+            except Exception as e:
+                print(f"[Memory] summarizer pass failed: {e}", file=sys.stderr)
+            if self._stop.wait(self._refresh_interval_sec):
+                return
 
     def run_pending(self) -> None:
         today = datetime.now().astimezone().strftime("%Y-%m-%d")

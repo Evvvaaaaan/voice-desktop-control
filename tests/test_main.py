@@ -458,6 +458,26 @@ class TestOrchestratorWiring:
         main()
         mocks["suggester"].assert_not_called()
 
+    def test_suggestion_speak_fn_matches_tts_signature(self, mocker, tmp_path):
+        """Regression: the speak_fn wiring must stay in sync with
+        actions.tts.speak — a stale tts_config kwarg once made every delivery
+        raise TypeError before anything was spoken, and unit tests couldn't
+        see it because they inject a fake speak_fn."""
+        mocks = self._patch_all(mocker, tmp_path)
+        from main import main
+        main()
+        speak_fn = mocks["suggester"].call_args.kwargs["speak_fn"]
+        run_mock = mocker.patch("actions.tts.subprocess.run")
+        speak_fn("제안 테스트")  # must not raise
+        run_mock.assert_called()
+
+    def test_agent_wired_with_routine_manager(self, mocker, tmp_path):
+        mocks = self._patch_all(mocker, tmp_path)
+        from main import main
+        main()
+        assert (mocks["agent"].call_args.kwargs["routines"]
+                is mocks["manager"].return_value)
+
     def test_settings_window_gets_paths(self, mocker, tmp_path):
         mocks = self._patch_all(mocker, tmp_path)
         from main import main

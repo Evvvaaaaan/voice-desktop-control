@@ -291,7 +291,7 @@ def main():
     llm = get_llm_adapter(config)
     collector = MetricsCollector(DB_PATH)
     detector = RoutineDetector(DB_PATH)
-    manager = RoutineManager(ROUTINES_PATH)  # noqa: F841  initialises routines.json
+    manager = RoutineManager(ROUTINES_PATH)
 
     hud = NotchHUD()
     hud.set_widgets(config.hud.show_clock, config.hud.show_media, config.hud.show_battery,
@@ -315,7 +315,8 @@ def main():
                  if memory_store else None)
 
     agent = Agent(llm, guard, collector, detector, config.tts,
-                  on_state=hud.set_state, memory=memory_store, retriever=retriever)
+                  on_state=hud.set_state, memory=memory_store, retriever=retriever,
+                  routines=manager)
 
     if memory_store:
         DailySummarizer(memory_store, llm, embedder).start_background()
@@ -353,7 +354,7 @@ def main():
         SuggestionEngine(
             memory_store, config.suggestion,
             speak_fn=lambda text: _suggest_speak(
-                text, config.tts.voice, config.tts.rate, tts_config=config.tts),
+                text, config.tts.voice, config.tts.rate),
             run_command_fn=_run_suggested,
             begin_session=_try_begin_session, end_session=_end_session,
             hud=hud,
