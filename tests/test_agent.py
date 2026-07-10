@@ -770,3 +770,51 @@ def test_cached_result_state_reported_before_speak(mocker):
 
     assert "state:success" in call_order
     assert call_order.index("state:success") < call_order.index("speak")
+
+
+# ---------- window-use dispatch ----------
+
+def test_dispatch_read_screen_returns_listing(mocker):
+    mocker.patch(
+        "actions.accessibility.snapshot_screen",
+        return_value='현재 앱: TestApp\n[1] 버튼 "확인"',
+    )
+    res = dispatch("read_screen", {})
+    assert res.startswith("현재 앱: TestApp")
+    assert '[1] 버튼 "확인"' in res
+
+
+def test_dispatch_click_element_clicks_fresh_center(mocker):
+    mocker.patch("actions.accessibility.element_known", return_value=True)
+    mocker.patch("actions.accessibility.element_center", return_value=(120.0, 240.0))
+    mock_click = mocker.patch("agent.tools.click")
+    res = dispatch("click_element", {"id": 2})
+    mock_click.assert_called_once_with(120, 240)
+    assert res == "clicked element 2 at 120,240"
+
+
+def test_dispatch_click_element_double(mocker):
+    mocker.patch("actions.accessibility.element_known", return_value=True)
+    mocker.patch("actions.accessibility.element_center", return_value=(10.0, 20.0))
+    mock_double = mocker.patch("agent.tools.double_click")
+    res = dispatch("click_element", {"id": 1, "double": True})
+    mock_double.assert_called_once_with(10, 20)
+    assert res == "double_clicked element 1 at 10,20"
+
+
+def test_dispatch_click_element_unknown_id(mocker):
+    mocker.patch("actions.accessibility.element_known", return_value=False)
+    res = dispatch("click_element", {"id": 99})
+    assert res.startswith("error: 알 수 없는 요소 id 99")
+
+
+def test_dispatch_click_element_stale_element(mocker):
+    mocker.patch("actions.accessibility.element_known", return_value=True)
+    mocker.patch("actions.accessibility.element_center", return_value=None)
+    res = dispatch("click_element", {"id": 3})
+    assert res.startswith("error: 요소 3")
+
+
+def test_dispatch_click_element_requires_int_id():
+    res = dispatch("click_element", {"id": "abc"})
+    assert res.startswith("error: click_element")

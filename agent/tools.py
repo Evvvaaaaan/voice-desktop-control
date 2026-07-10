@@ -1,5 +1,6 @@
 import re
 import os
+from actions import accessibility
 from actions.applescript import run_applescript
 from actions.mouse_keyboard import (
     click, double_click, move_mouse, type_text, press_key, scroll,
@@ -117,6 +118,26 @@ def dispatch(action: str, params: dict) -> str:
         if not script:
             return "error: run_applescript requires param script"
         return run_applescript(script)
+    elif action == "read_screen":
+        return accessibility.snapshot_screen()
+    elif action == "click_element":
+        try:
+            element_id = int(params.get("id"))
+        except (TypeError, ValueError):
+            return "error: click_element requires integer param id"
+        if not accessibility.element_known(element_id):
+            return (f"error: 알 수 없는 요소 id {element_id} — "
+                    "read_screen을 먼저 실행하세요")
+        center = accessibility.element_center(element_id)
+        if center is None:
+            return (f"error: 요소 {element_id}가 더 이상 존재하지 않아요 — "
+                    "read_screen으로 다시 확인하세요")
+        x, y = int(center[0]), int(center[1])
+        if params.get("double"):
+            double_click(x, y)
+            return f"double_clicked element {element_id} at {x},{y}"
+        click(x, y)
+        return f"clicked element {element_id} at {x},{y}"
     elif action == "screenshot":
         return f"screenshot_taken:{len(take_screenshot_with_grid())} bytes"
     elif action == "speak_only":
