@@ -401,11 +401,22 @@ def _fake_tree():
 
 def _patch_ax(monkeypatch, window, trusted=True, app_name="TestApp"):
     from actions import accessibility as ax
+    ax.clear_target_app()
     monkeypatch.setattr(ax, "_ax_trusted", lambda: trusted)
     monkeypatch.setattr(ax, "_frontmost_app", lambda: (app_name, 123))
+    monkeypatch.setattr(ax, "_running_apps", lambda: [(app_name, 123)])
     monkeypatch.setattr(ax, "_ax_app", lambda pid: {"AXWindows": [window]})
     monkeypatch.setattr(ax, "_ax_attr", lambda elem, name: elem.get(name))
     monkeypatch.setattr(ax, "_ax_center", lambda elem: elem.get("center"))
+    monkeypatch.setattr(ax, "_ax_actions", lambda elem: elem.get("actions", []))
+    monkeypatch.setattr(ax, "_ax_perform",
+                        lambda elem, action: elem.get("perform_ok", True))
+    monkeypatch.setattr(ax, "_ax_settable",
+                        lambda elem, name: elem.get("settable", False))
+    monkeypatch.setattr(
+        ax, "_ax_set",
+        lambda elem, name, v: (elem.setdefault("set_values", []).append(v), True)[1],
+    )
 
 
 def test_snapshot_lists_interactive_elements_numbered(monkeypatch):
@@ -486,3 +497,96 @@ def test_element_center_none_when_element_gone(monkeypatch):
     snapshot_screen()
     del btn["center"]                # element no longer resolves
     assert element_center(1) is None
+
+
+# ---------- independent actuation (AXPress / AXSetValue / target pinning) ----------
+
+def test_press_element_uses_ax_action(monkeypatch):
+    from actions.accessibility import snapshot_screen, press_element
+    window, btn, _ = _fake_tree()
+    btn["actions"] = ["AXPress"]
+    _patch_ax(monkeypatch, window)
+    snapshot_screen()
+    assert press_element(1) == "pressed element 1 (AXPress)"
+
+
+def test_press_element_none_without_ax_action(monkeypatch):
+    from actions.accessibility import snapshot_screen, press_element
+    window, btn, _ = _fake_tree()
+    btn["actions"] = []
+    _patch_ax(monkeypatch, window)
+    snapshot_screen()
+    assert press_element(1) is None
+
+
+def test_press_element_double_prefers_axopen(monkeypatch):
+    from actions.accessibility import snapshot_screen, press_element
+    window, btn, _ = _fake_tree()
+    btn["actions"] = ["AXPress", "AXOpen"]
+    _patch_ax(monkeypatch, window)
+    snapshot_screen()
+    assert press_element(1, double=True) == "pressed element 1 (AXOpen)"
+
+
+def test_press_element_none_when_perform_fails(monkeypatch):
+    from actions.accessibility import snapshot_screen, press_element
+    window, btn, _ = _fake_tree()
+    btn["actions"] = ["AXPress"]
+    btn["perform_ok"] = False
+    _patch_ax(monkeypatch, window)
+    snapshot_screen()
+    assert press_element(1) is None
+
+
+def test_set_element_value_success(monkeypatch):
+    from actions.accessibility import snapshot_screen, set_element_value
+    window, _, field = _fake_tree()
+    field["settable"] = True
+    _patch_ax(monkeypatch, window)
+    snapshot_screen()
+    assert set_element_value(2, "hello") == "value set on element 2"
+    assert field["set_values"] == ["hello"]
+
+
+def test_set_element_value_not_settable(monkeypatch):
+    from actions.accessibility import snapshot_screen, set_element_value
+    window, _, field = _fake_tree()
+    _patch_ax(monkeypatch, window)
+    snapshot_screen()
+    assert set_element_value(2, "hello").startswith("error: 이 요소에는")
+
+
+def test_snapshot_uses_pinned_target_not_frontmost(monkeypatch):
+    from actions import accessibility as ax
+    window, _, _ = _fake_tree()
+    _patch_ax(monkeypatch, window)
+    seen_pids = []
+    monkeypatch.setattr(
+        ax, "_ax_app", lambda pid: seen_pids.append(pid) or {"AXWindows": [window]}
+    )
+    assert ax.set_target_app("TestApp") is True
+    # user switches to another app — snapshot must ignore the frontmost
+    monkeypatch.setattr(ax, "_frontmost_app", lambda: ("OtherApp", 999))
+    text = ax.snapshot_screen()
+    assert text.startswith("현재 앱: TestApp")
+    assert seen_pids == [123]
+
+
+def test_snapshot_pins_first_app_without_explicit_target(monkeypatch):
+    from actions import accessibility as ax
+    window, _, _ = _fake_tree()
+    _patch_ax(monkeypatch, window)
+    ax.snapshot_screen()                      # pins TestApp (123)
+    monkeypatch.setattr(ax, "_frontmost_app", lambda: ("OtherApp", 999))
+    text = ax.snapshot_screen()
+    assert text.startswith("현재 앱: TestApp")
+
+
+def test_snapshot_errors_when_target_app_gone(monkeypatch):
+    from actions import accessibility as ax
+    window, _, _ = _fake_tree()
+    _patch_ax(monkeypatch, window)
+    assert ax.set_target_app("TestApp") is True
+    monkeypatch.setattr(ax, "_running_apps", lambda: [])
+    text = ax.snapshot_screen()
+    assert text.startswith("error: 대상 앱")

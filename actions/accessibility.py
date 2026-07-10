@@ -111,13 +111,19 @@ def _ax_center(elem):
 def snapshot_screen() -> str:
     """Walk the frontmost app's AX tree into a numbered interactive-element
     list. Repopulates the id snapshot; all previous ids become invalid."""
+    global _TARGET_PID, _TARGET_NAME
     _SNAPSHOT.clear()
     if not _ax_trusted():
         return ("error: 접근성 권한이 없어요 — 시스템 설정 → 개인정보 보호 및 보안 → "
                 "손쉬운 사용에서 VoiceDesk를 허용해 주세요")
-    name, pid = _frontmost_app()
+    name, pid = _TARGET_NAME, _TARGET_PID
+    if pid is not None and all(p != pid for _, p in _running_apps()):
+        return f"error: 대상 앱({name})이 종료되었어요 — 앱을 다시 실행해 주세요"
     if pid is None:
-        return "error: 활성 앱을 찾을 수 없어요"
+        name, pid = _frontmost_app()
+        if pid is None:
+            return "error: 활성 앱을 찾을 수 없어요"
+        _TARGET_PID, _TARGET_NAME = pid, name
     try:
         app = _ax_app(pid)
         windows = list(_ax_attr(app, "AXWindows") or [])[:_MAX_WINDOWS]
@@ -176,3 +182,97 @@ def element_center(element_id: int):
     if elem is None:
         return None
     return _ax_center(elem)
+
+
+def _ax_actions(elem) -> list:
+    import ApplicationServices as AS
+    err, actions = AS.AXUIElementCopyActionNames(elem, None)
+    return list(actions or []) if err == 0 else []
+
+
+def _ax_perform(elem, action) -> bool:
+    import ApplicationServices as AS
+    return AS.AXUIElementPerformAction(elem, action) == 0
+
+
+def _ax_settable(elem, name) -> bool:
+    import ApplicationServices as AS
+    err, settable = AS.AXUIElementIsAttributeSettable(elem, name, None)
+    return err == 0 and bool(settable)
+
+
+def _ax_set(elem, name, value) -> bool:
+    import ApplicationServices as AS
+    return AS.AXUIElementSetAttributeValue(elem, name, value) == 0
+
+
+def _running_apps() -> list:
+    """[(localized name, pid)] of currently running apps."""
+    import AppKit
+    return [(str(a.localizedName() or ""), int(a.processIdentifier()))
+            for a in AppKit.NSWorkspace.sharedWorkspace().runningApplications()]
+
+
+# The app the current command works on. Pinned by launch_app or the first
+# read_screen of a command, cleared when a new command starts — so the agent
+# keeps driving ITS app even when the user focuses something else.
+_TARGET_PID: int | None = None
+_TARGET_NAME: str | None = None
+
+
+def set_target_app(name: str) -> bool:
+    """Pin the agent's target app by name. Exact localized-name match first,
+    then substring, case-insensitive. False when no running app matches."""
+    global _TARGET_PID, _TARGET_NAME
+    want = name.strip().lower()
+    if not want:
+        return False
+    apps = _running_apps()
+    for app_name, pid in apps:
+        if app_name.lower() == want:
+            _TARGET_PID, _TARGET_NAME = pid, app_name
+            return True
+    for app_name, pid in apps:
+        if want in app_name.lower():
+            _TARGET_PID, _TARGET_NAME = pid, app_name
+            return True
+    return False
+
+
+def clear_target_app() -> None:
+    global _TARGET_PID, _TARGET_NAME
+    _TARGET_PID = None
+    _TARGET_NAME = None
+
+
+def press_element(element_id: int, double: bool = False):
+    """Actuate a snapshotted element via its AX action — no cursor movement,
+    works while the app is in the background. Returns the result string, or
+    None when the element exposes no usable action (caller falls back to a
+    real mouse click)."""
+    elem = _SNAPSHOT.get(element_id)
+    if elem is None:
+        return None
+    names = _ax_actions(elem)
+    if double and "AXOpen" in names:
+        action = "AXOpen"
+    elif "AXPress" in names:
+        action = "AXPress"
+    else:
+        return None
+    if not _ax_perform(elem, action):
+        return None
+    return f"pressed element {element_id} ({action})"
+
+
+def set_element_value(element_id: int, text: str) -> str:
+    """Set a text element's value directly via AX — no keyboard, clipboard,
+    or focus involved."""
+    elem = _SNAPSHOT.get(element_id)
+    if elem is None:
+        return (f"error: 알 수 없는 요소 id {element_id} — "
+                "read_screen을 먼저 실행하세요")
+    if not _ax_settable(elem, "AXValue") or not _ax_set(elem, "AXValue", text):
+        return ("error: 이 요소에는 값을 직접 넣을 수 없어요 — "
+                "click_element 후 type_text를 쓰세요")
+    return f"value set on element {element_id}"
