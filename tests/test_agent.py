@@ -897,3 +897,12 @@ def test_click_element_is_never_hot_cached(mocker):
     agent.run("확인 눌러줘")
 
     record.assert_not_called()
+
+
+def test_system_prompt_documents_window_use():
+    from agent.context import SYSTEM_PROMPT
+    assert "read_screen" in SYSTEM_PROMPT
+    assert "click_element" in SYSTEM_PROMPT
+    # screenshot flow must remain documented as the fallback
+    assert "screenshot" in SYSTEM_PROMPT
+    assert "0-1000" in SYSTEM_PROMPT or "0–1000" in SYSTEM_PROMPT
