@@ -818,3 +818,82 @@ def test_dispatch_click_element_stale_element(mocker):
 def test_dispatch_click_element_requires_int_id():
     res = dispatch("click_element", {"id": "abc"})
     assert res.startswith("error: click_element")
+
+
+# ---------- window-use agent loop integration ----------
+
+def _mk_agent(mock_llm):
+    guard = MagicMock()
+    guard.check.return_value = True
+    guard.is_dangerous.return_value = False
+    detector = MagicMock()
+    detector.record.return_value = False
+    return Agent(mock_llm, guard, MagicMock(), detector,
+                 MagicMock(voice="Yuna", rate=200))
+
+
+def test_click_element_observation_is_text_with_fresh_elements(mocker):
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = True   # vision model still gets TEXT here
+    mock_llm.complete.side_effect = [
+        '{"action":"click_element","params":{"id":3},"done":false,"response":"클릭"}',
+        '{"action":"speak_only","params":{},"done":true,"response":"완료"}',
+    ]
+    agent = _mk_agent(mock_llm)
+    mocker.patch("agent.core.tools.dispatch",
+                 return_value="clicked element 3 at 100,200")
+    mocker.patch("agent.core.run_applescript", return_value="TestApp")
+    mocker.patch("agent.core.snapshot_screen", return_value='[1] 버튼 "확인"')
+    mocker.patch("agent.core.time.sleep")
+    mocker.patch("agent.core.speak")
+
+    agent.run("확인 눌러줘")
+
+    # messages is mutated in place after the call, so locate the observation
+    # message instead of relying on list position.
+    messages = mock_llm.complete.call_args_list[1][0][0]
+    obs_msgs = [m for m in messages
+                if m["role"] == "user" and "관찰" in str(m.get("content", ""))]
+    assert obs_msgs, "no observation message found"
+    assert '버튼 "확인"' in obs_msgs[-1]["content"]
+    mock_llm.build_observation.assert_not_called()
+
+
+def test_read_screen_observation_is_text_only(mocker):
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = True
+    listing = '현재 앱: TestApp\n[1] 버튼 "확인"'
+    mock_llm.complete.side_effect = [
+        '{"action":"read_screen","params":{},"done":false,"response":"확인 중"}',
+        '{"action":"speak_only","params":{},"done":true,"response":"완료"}',
+    ]
+    agent = _mk_agent(mock_llm)
+    mocker.patch("agent.core.tools.dispatch", return_value=listing)
+    mocker.patch("agent.core.run_applescript", return_value="TestApp")
+    mocker.patch("agent.core.speak")
+
+    agent.run("화면 읽어줘")
+
+    messages = mock_llm.complete.call_args_list[1][0][0]
+    obs_msgs = [m for m in messages
+                if m["role"] == "user" and "관찰" in str(m.get("content", ""))]
+    assert obs_msgs, "no observation message found"
+    assert '[1] 버튼 "확인"' in obs_msgs[-1]["content"]
+    mock_llm.build_observation.assert_not_called()
+
+
+def test_click_element_is_never_hot_cached(mocker):
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.return_value = (
+        '{"action":"click_element","params":{"id":1},"done":true,"response":"눌렀어요"}'
+    )
+    agent = _mk_agent(mock_llm)
+    mocker.patch("agent.core.tools.dispatch",
+                 return_value="clicked element 1 at 5,5")
+    mocker.patch("agent.core.speak")
+    record = mocker.patch.object(agent._cache, "record")
+
+    agent.run("확인 눌러줘")
+
+    record.assert_not_called()

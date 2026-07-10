@@ -12,6 +12,7 @@ from agent import tools
 from actions.tts import speak
 from actions.applescript import run_applescript
 from actions.screen import take_screenshot_with_grid
+from actions.accessibility import snapshot_screen
 
 # Computer-use tasks need room to screenshot → click → verify → correct.
 MAX_ITERATIONS = 8
@@ -23,6 +24,14 @@ MAX_ITERATIONS = 8
 MAX_JSON_RETRIES = 2
 
 _SCREEN_OBSERVATION_ACTIONS = {"screenshot", "click", "double_click", "move_mouse", "scroll", "type_text"}
+
+# Snapshot-dependent actions can't be replayed from the hot cache (the id
+# refers to a screen that no longer exists), and read_screen alone does
+# nothing user-visible.
+_UNCACHEABLE_ACTIONS = {"speak_only", "read_screen", "click_element"}
+
+# Let the UI react (menu open, page transition) before re-reading elements.
+_ELEMENT_SETTLE_SEC = 0.4
 
 _THINK_BLOCK_RE = re.compile(r'<think>.*?</think>', re.DOTALL)
 
@@ -83,6 +92,14 @@ class Agent:
             f"현재 활성 앱: {front or '알 수 없음'}. "
             "요청이 완전히 끝났으면 done=true로, 아니면 다음 단계를 수행하세요."
         )
+        if action in ("read_screen", "click_element"):
+            # Window-use observations are text: read_screen's listing is
+            # already in dispatch_res, and after a click we re-read the
+            # elements so the model verifies the result without a screenshot.
+            if action == "click_element" and not dispatch_res.startswith("error"):
+                time.sleep(_ELEMENT_SETTLE_SEC)
+                text += "\n클릭 후 화면 요소:\n" + snapshot_screen()
+            return {"role": "user", "content": text}
         if (
             getattr(self._llm, "supports_vision", False) is True
             and action in _SCREEN_OBSERVATION_ACTIONS
@@ -260,7 +277,7 @@ class Agent:
                     # Only single-step, real actions are safe to cache: a
                     # multi-step command can't be replayed from one action and
                     # a speak_only reply would lose its answer on replay.
-                    if i == 0 and action != "speak_only":
+                    if i == 0 and action not in _UNCACHEABLE_ACTIONS:
                         self._cache.record(command, f"{action}:{json.dumps(params)}")
                     final_response = response_text
                     break
