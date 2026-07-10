@@ -383,3 +383,106 @@ def test_double_click_waits_for_ui_to_settle(mocker):
     mock_sleep = mocker.patch.object(mk.time, "sleep")
     mk.double_click(100, 100)
     mock_sleep.assert_called_once()
+
+
+# ---------- AX window-use snapshot ----------
+
+def _fake_tree():
+    """dict-based fake AX tree. _patch_ax wires accessors to read these dicts."""
+    btn = {"AXRole": "AXButton", "AXTitle": "확인", "center": (100.0, 200.0)}
+    field = {
+        "AXRole": "AXTextField", "AXTitle": "주소창",
+        "AXValue": "mail.google.com", "center": (300.0, 50.0),
+    }
+    group = {"AXRole": "AXGroup", "AXChildren": [btn, field]}
+    window = {"AXRole": "AXWindow", "AXTitle": "테스트 창", "AXChildren": [group]}
+    return window, btn, field
+
+
+def _patch_ax(monkeypatch, window, trusted=True, app_name="TestApp"):
+    from actions import accessibility as ax
+    monkeypatch.setattr(ax, "_ax_trusted", lambda: trusted)
+    monkeypatch.setattr(ax, "_frontmost_app", lambda: (app_name, 123))
+    monkeypatch.setattr(ax, "_ax_app", lambda pid: {"AXWindows": [window]})
+    monkeypatch.setattr(ax, "_ax_attr", lambda elem, name: elem.get(name))
+    monkeypatch.setattr(ax, "_ax_center", lambda elem: elem.get("center"))
+
+
+def test_snapshot_lists_interactive_elements_numbered(monkeypatch):
+    from actions.accessibility import snapshot_screen
+    window, _, _ = _fake_tree()
+    _patch_ax(monkeypatch, window)
+    text = snapshot_screen()
+    assert text.startswith('현재 앱: TestApp — 창: "테스트 창"')
+    assert '[1] 버튼 "확인"' in text
+    assert '[2] 텍스트필드 "주소창" 값="mail.google.com"' in text
+
+
+def test_snapshot_error_without_ax_trust(monkeypatch):
+    from actions.accessibility import snapshot_screen
+    window, _, _ = _fake_tree()
+    _patch_ax(monkeypatch, window, trusted=False)
+    text = snapshot_screen()
+    assert text.startswith("error: 접근성 권한")
+
+
+def test_snapshot_advises_screenshot_fallback_when_few_elements(monkeypatch):
+    from actions.accessibility import snapshot_screen
+    window, _, _ = _fake_tree()   # only 2 interactive elements (< 5)
+    _patch_ax(monkeypatch, window)
+    text = snapshot_screen()
+    assert "screenshot" in text
+
+
+def test_snapshot_caps_listed_elements(monkeypatch):
+    from actions.accessibility import snapshot_screen
+    buttons = [
+        {"AXRole": "AXButton", "AXTitle": f"b{i}", "center": (10.0, 10.0)}
+        for i in range(200)
+    ]
+    window = {"AXRole": "AXWindow", "AXTitle": "많음", "AXChildren": buttons}
+    _patch_ax(monkeypatch, window)
+    text = snapshot_screen()
+    assert "[150]" in text
+    assert "[151]" not in text
+
+
+def test_snapshot_skips_elements_without_geometry(monkeypatch):
+    from actions.accessibility import snapshot_screen
+    ghost = {"AXRole": "AXButton", "AXTitle": "유령"}   # no center -> zero-size
+    real = {"AXRole": "AXButton", "AXTitle": "실재", "center": (5.0, 5.0)}
+    window = {"AXRole": "AXWindow", "AXChildren": [ghost, real]}
+    _patch_ax(monkeypatch, window)
+    text = snapshot_screen()
+    assert "유령" not in text
+    assert '[1] 버튼 "실재"' in text
+
+
+def test_new_snapshot_invalidates_previous_ids(monkeypatch):
+    from actions.accessibility import snapshot_screen, element_known
+    window, _, _ = _fake_tree()
+    _patch_ax(monkeypatch, window)
+    snapshot_screen()
+    assert element_known(1) is True
+    empty = {"AXRole": "AXWindow", "AXChildren": []}
+    _patch_ax(monkeypatch, empty)
+    snapshot_screen()
+    assert element_known(1) is False
+
+
+def test_element_center_is_fresh_at_click_time(monkeypatch):
+    from actions.accessibility import snapshot_screen, element_center
+    window, btn, _ = _fake_tree()
+    _patch_ax(monkeypatch, window)
+    snapshot_screen()
+    btn["center"] = (555.0, 666.0)   # window moved after the snapshot
+    assert element_center(1) == (555.0, 666.0)
+
+
+def test_element_center_none_when_element_gone(monkeypatch):
+    from actions.accessibility import snapshot_screen, element_center
+    window, btn, _ = _fake_tree()
+    _patch_ax(monkeypatch, window)
+    snapshot_screen()
+    del btn["center"]                # element no longer resolves
+    assert element_center(1) is None
