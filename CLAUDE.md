@@ -40,8 +40,9 @@ The agent loop in `agent/core.py` enforces the same harness the docs describe:
 - **No false success claims**: a failing command must never speak the model's
   success text; the honest fallback is used. Covered by
   `test_false_success_claim_never_spoken_when_action_keeps_failing`.
-- **Cache safety**: only single-step, non-error, non-speak_only actions may be
-  cached (replay safety).
+- **Cache safety**: only single-step, non-error actions may be cached (replay
+  safety); speak_only and snapshot-dependent window-use actions
+  (read_screen/click_element) are excluded.
 - The system prompt lives ONLY in `agent/context.py` — never add per-adapter
   prompts in `llm/*`.
 
