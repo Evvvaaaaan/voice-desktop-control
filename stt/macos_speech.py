@@ -13,6 +13,11 @@ try:
     from Foundation import NSURL, NSLocale, NSBundle
 except ImportError:
     SFSpeechRecognizer = None
+    SFSpeechURLRecognitionRequest = None
+    SFSpeechRecognizerAuthorizationStatusAuthorized = None
+    NSURL = None
+    NSLocale = None
+    NSBundle = None
 
 
 def _bundle_has_speech_usage_description() -> bool:
