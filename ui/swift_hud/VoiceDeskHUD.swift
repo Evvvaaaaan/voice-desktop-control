@@ -401,7 +401,10 @@ private struct HUDView: View {
         // straight down, never as a detached floating card.
         let shape = BottomRoundedRect(radius: cornerRadius)
         ZStack {
-            shape.fill(Color.black.opacity(0.96))
+            // Fully opaque black: at 0.96 the anti-aliased rounded edge let the
+            // background bleed ~4% through, which on a bright wallpaper read as a
+            // faint grey rim. Solid black keeps the edge crisp with no halo.
+            shape.fill(Color.black)
             if !isCollapsed && glowsWithAccent {
                 shape.fill(
                     RadialGradient(
@@ -446,13 +449,10 @@ private struct HUDView: View {
                     .padding(.top, T.pinnedHeaderOverlayTop)
             }
         }
-        // No SwiftUI drop shadow here: the pill fills the window's rectangle
-        // exactly, so a `.shadow()` gets sliced flat along the window's straight
-        // bottom/side edges — leaving a faint angular corner behind the rounded
-        // pill instead of fading in a round arc. Depth comes from the AppKit
-        // window shadow (`hasShadow = true` + `invalidateShadow()`), which the
-        // window server draws OUTSIDE the frame following the rounded alpha, so
-        // it is never clipped into a square.
+        // No shadow of any kind — neither a SwiftUI `.shadow()` nor the AppKit
+        // window shadow (`hasShadow = false`). The window shadow used to supply
+        // depth, but it drew a soft grey halo around the pill that read as a grey
+        // border, so the surface is now a flat black shape with no outline.
         .contentShape(Rectangle())
         .onTapGesture {
             if snapshot.visual != "danger_confirm" && snapshot.visual != "text_input" {
@@ -629,11 +629,7 @@ private struct HUDView: View {
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(.white)
                 .frame(width: 27, height: 27)
-                .background(
-                    Circle()
-                        .fill(T.control)
-                        .overlay(Circle().strokeBorder(T.hairline, lineWidth: 0.75))
-                )
+                .background(Circle().fill(T.control))
         }
         .buttonStyle(.plain)
     }
@@ -648,10 +644,6 @@ private struct HUDView: View {
                         .aspectRatio(contentMode: .fill)
                         .frame(width: 40, height: 40)
                         .clipShape(RoundedRectangle(cornerRadius: T.rArt, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: T.rArt, style: .continuous)
-                                .strokeBorder(T.hairline, lineWidth: 0.75)
-                        )
                 } else {
                     iconBadge("music.note", .pink, size: 40)
                 }
@@ -705,10 +697,6 @@ private struct HUDView: View {
                             startPoint: .top, endPoint: .bottom
                         )
                     )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: T.rCard, style: .continuous)
-                            .strokeBorder(T.hairline, lineWidth: 1)
-                    )
             )
     }
 
@@ -735,10 +723,6 @@ private struct HUDView: View {
             .background(
                 RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
                     .fill(Color.white.opacity(0.10))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
-                            .strokeBorder(T.hairline, lineWidth: 0.75)
-                    )
             )
             // Flatten glyph + background into one raster so they snap to the
             // pixel grid together. Without this, on a 1x (non-Retina) external
@@ -754,7 +738,6 @@ private struct HUDView: View {
     private func iconBadge(_ symbol: String, _ tint: Color, size: CGFloat = 26) -> some View {
         ZStack {
             Circle().fill(tint.opacity(0.18))
-            Circle().strokeBorder(tint.opacity(0.22), lineWidth: 0.75)
             Image(systemName: symbol)
                 .font(.system(size: size * 0.44, weight: .semibold))
                 .symbolRenderingMode(.hierarchical)
@@ -913,11 +896,7 @@ private struct HUDView: View {
             }
             .padding(.horizontal, T.space3)
             .padding(.vertical, T.space1 + 2)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(T.control)
-                    .overlay(Capsule(style: .continuous).strokeBorder(T.hairline, lineWidth: 0.75))
-            )
+            .background(Capsule(style: .continuous).fill(T.control))
         }
         .buttonStyle(.plain)
     }
@@ -1063,8 +1042,7 @@ private final class HUDController {
                     // scale carries the growth out of the notch.
                     suppressHoverUntil = Date().addingTimeInterval(frameAnimationDuration + 0.05)
                     window.setFrame(frame, display: true)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + frameAnimationDuration) { [weak self, weak window] in
-                        window?.invalidateShadow()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + frameAnimationDuration) { [weak self] in
                         self?.reconcileHover(force: true, confirmInside: true)
                     }
                 } else if surfaceShrinks && surfaceStartSize != nil {
@@ -1085,7 +1063,6 @@ private final class HUDController {
                     DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay) { [weak self, weak window] in
                         guard let self, let window, self.snapshot.visual == settleVisual else { return }
                         window.setFrame(frame, display: true)
-                        window.invalidateShadow()
                         self.settleShrunkSurface(key: settleKey)
                         self.reconcileHover(force: true, confirmInside: false)
                     }
@@ -1119,7 +1096,6 @@ private final class HUDController {
             )
             if isNewWindow || !window.isVisible {
                 window.orderFrontRegardless()
-                window.invalidateShadow()
             }
         }
 
@@ -1215,13 +1191,9 @@ private final class HUDController {
     }
 
     private func settleFrameAnimation(for window: NSWindow) {
-        // The non-opaque window's drop shadow is derived from the content's
-        // bounding rectangle and is NOT recomputed as the frame animates, so
-        // once the panel settles a faint square ghost can linger behind the
-        // pill's rounded bottom corners. Re-derive it from the final rounded
-        // alpha, then reconcile hover edges that may have been suppressed
-        // during the animation.
-        window.invalidateShadow()
+        // Reconcile hover edges that may have been suppressed during the frame
+        // animation. (The window has no shadow, so there is no shadow ghost to
+        // re-derive here anymore.)
         reconcileHover(force: true, confirmInside: true)
     }
 
@@ -1305,7 +1277,11 @@ private final class HUDController {
         window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.statusWindow)) + 1)
         window.isOpaque = false
         window.backgroundColor = .clear
-        window.hasShadow = true
+        // No window shadow: the non-opaque window's drop shadow rendered as a
+        // soft grey halo hugging the pill's rounded edge, which read as a grey
+        // border around the surface in every state. The pill is a flat black
+        // shape with no outline of any kind.
+        window.hasShadow = false
         window.ignoresMouseEvents = false
         window.collectionBehavior = [
             .canJoinAllSpaces,
