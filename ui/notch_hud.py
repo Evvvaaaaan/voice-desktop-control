@@ -1215,6 +1215,10 @@ class NotchHUD:
             command = str(event.get("command", "")).strip()
             if command:
                 self._run_command_async(command)
+        elif name == "commandSubmit":
+            command = str(event.get("command", "")).strip()
+            if command:
+                self._run_command_async(command)
         elif name == "mediaPrev":
             self._control_media_async("previous track")
         elif name == "mediaNext":

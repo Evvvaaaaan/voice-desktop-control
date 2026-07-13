@@ -903,6 +903,26 @@ def test_command_suggestion_event_ignores_blank():
     assert ran == []
 
 
+def test_command_submit_event_runs_command_via_callback():
+    hud = _isolated_hud()
+    ran = []
+    hud.set_run_command_callback(lambda cmd: ran.append(cmd))
+    hud._on_swift_event({"event": "commandSubmit", "command": "텍스트로 실행해줘"})
+    import time
+    time.sleep(0.05)
+    assert ran == ["텍스트로 실행해줘"]
+
+
+def test_command_submit_event_ignores_blank():
+    hud = _isolated_hud()
+    ran = []
+    hud.set_run_command_callback(lambda cmd: ran.append(cmd))
+    hud._on_swift_event({"event": "commandSubmit", "command": "   "})
+    import time
+    time.sleep(0.05)
+    assert ran == []
+
+
 def test_run_routine_event_dispatches_and_speaks(mocker):
     hud = _isolated_hud()
     mock_dispatch = mocker.patch("agent.tools.dispatch", return_value="routine_done")

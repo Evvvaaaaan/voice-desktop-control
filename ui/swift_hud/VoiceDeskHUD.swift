@@ -917,7 +917,7 @@ private struct CalendarWidget: View {
                 // Tapping the text (not the circle) opens the edit/delete popup —
                 // scoped to the text so a circle tap only toggles completion.
                 Text(item.text)
-                    .font(T.body)
+                    .font(T.caption)
                     .foregroundStyle(item.done ? T.ink3 : T.ink)
                     .strikethrough(item.done, color: T.ink3)
                     .lineLimit(1)
@@ -989,19 +989,28 @@ private struct CalendarWidget: View {
     /// is grabbed after a short delay so the pinned window has already been
     /// keyed (via `inlineEditBegin`) — otherwise the focus request is dropped.
     private func inlineField(placeholder: String, onSubmit: @escaping () -> Void) -> some View {
-        TextField(placeholder, text: $draft)
-            .textFieldStyle(.plain)
-            .font(T.body)
-            .foregroundStyle(T.ink)
-            .tint(accent)
-            .lineLimit(1)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .focused($fieldFocused)
-            .onSubmit(onSubmit)
-            .onExitCommand { endInlineEdit() }
-            .onAppear {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { fieldFocused = true }
+        ZStack(alignment: .leading) {
+            if draft.isEmpty {
+                Text(placeholder)
+                    .font(T.caption)
+                    .foregroundStyle(T.ink3)
+                    .lineLimit(1)
+                    .allowsHitTesting(false)
             }
+            TextField("", text: $draft)
+                .textFieldStyle(.plain)
+                .font(T.caption)
+                .foregroundStyle(T.ink)
+                .tint(accent)
+                .lineLimit(1)
+                .focused($fieldFocused)
+                .onSubmit(onSubmit)
+                .onExitCommand { endInlineEdit() }
+                .onAppear {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { fieldFocused = true }
+                }
+        }
+        .frame(maxWidth: .infinity, minHeight: 18, alignment: .center)
     }
 
     private func startAdding() {
@@ -1224,6 +1233,8 @@ private struct HUDView: View {
 
     @State private var surfaceScaleX: CGFloat = 1
     @State private var surfaceScaleY: CGFloat = 1
+    @State private var commandDraft = ""
+    @FocusState private var commandFieldFocused: Bool
 
     private var accent: Color {
         Color(nsColor: snapshot.stateColor)
@@ -1815,22 +1826,31 @@ private struct HUDView: View {
     }
 
     /// Always-on "type a command" field at the panel's bottom, beneath the
-    /// command palette. UI only for now — it reads as an input but isn't wired
-    /// to the agent yet (that needs the panel to take keyboard focus; deferred
-    /// to the backend pass). The palette above it is the functional path.
+    /// command palette. Submitting emits `commandSubmit`, which follows the
+    /// same locked agent path as a tapped suggestion.
     private var commandInputBar: some View {
         HStack(spacing: T.space2) {
-            Image(systemName: "text.cursor")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(T.ink2)
-            Text("명령을 입력하세요")
+            TextField("명령을 입력하세요", text: $commandDraft)
+                .textFieldStyle(.plain)
                 .font(T.body)
-                .foregroundStyle(T.ink3)
+                .foregroundStyle(T.ink)
+                .tint(Color(red: 0.40, green: 0.72, blue: 1.0))
                 .lineLimit(1)
+                .focused($commandFieldFocused)
+                .onSubmit(submitTypedCommand)
+                .onExitCommand { endCommandInput() }
+                .simultaneousGesture(TapGesture().onEnded { beginCommandInput() })
             Spacer(minLength: 0)
-            Image(systemName: "return")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(T.ink3)
+            Button {
+                submitTypedCommand()
+            } label: {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(commandDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                     ? T.ink3 : Color(red: 0.40, green: 0.72, blue: 1.0))
+            }
+            .buttonStyle(.plain)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, T.space3)
@@ -1839,6 +1859,35 @@ private struct HUDView: View {
             RoundedRectangle(cornerRadius: T.rArt, style: .continuous)
                 .fill(T.control)
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: T.rArt, style: .continuous)
+                .strokeBorder(commandFieldFocused ? Color(red: 0.40, green: 0.72, blue: 1.0).opacity(0.65)
+                              : Color.clear, lineWidth: 1)
+        )
+    }
+
+    private func beginCommandInput() {
+        emit("inlineEditBegin", [:])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            commandFieldFocused = true
+        }
+    }
+
+    private func endCommandInput() {
+        commandFieldFocused = false
+        emit("inlineEditEnd", [:])
+    }
+
+    private func submitTypedCommand() {
+        let command = commandDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !command.isEmpty else {
+            endCommandInput()
+            return
+        }
+        commandDraft = ""
+        commandFieldFocused = false
+        emit("commandSubmit", ["command": command])
+        emit("inlineEditEnd", [:])
     }
 
     /// A small circular badge behind an SF Symbol — reads as a proper icon
@@ -1939,6 +1988,7 @@ private struct HUDView: View {
                     .tracking(0.3)
             }
             .foregroundStyle(T.ink3)
+            .padding(.top, T.space1 + 2)
         }
         .padding(.horizontal, T.space4)
         .padding(.top, T.space3)
@@ -2369,10 +2419,13 @@ private final class HUDController {
     /// True when a top-anchored scale morph should play between `from` and `to`:
     /// both on the idle ladder, or both compact notch-strip surfaces. collapsed
     /// belongs to both groups, so it morphs out to a panel OR out to an active
-    /// strip. text_input (the full keyboard panel) is in neither and plain-resizes.
+    /// strip. Any idle surface can also collapse directly into an active strip
+    /// when a wake-word activation arrives while the large panel is open.
+    /// text_input (the full keyboard panel) is in neither and plain-resizes.
     private func isMorphPair(from: String, to: String) -> Bool {
         (isIdleLadder(from) && isIdleLadder(to))
             || (isNotchStripSurface(from) && isNotchStripSurface(to))
+            || (isIdleLadder(from) && isNotchStripSurface(to))
     }
 
     private func installHoverMonitors() {
