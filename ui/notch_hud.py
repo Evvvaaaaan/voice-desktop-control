@@ -419,6 +419,14 @@ class _SwiftHUDBridge:
             exe = _swift_hud_executable()
             if exe is None:
                 return False
+            # Hand the bundled Pretendard face down so the HUD can register it
+            # even when the user has not installed Pretendard system-wide. The
+            # Swift side treats this as optional and falls back to the system
+            # font if the path is missing or fails to register.
+            env = os.environ.copy()
+            font = _find_existing_resource("PretendardVariable.ttf")
+            if font is not None:
+                env["VOICEDESK_HUD_FONT"] = str(font)
             try:
                 self._process = subprocess.Popen(
                     [str(exe)],
@@ -427,6 +435,7 @@ class _SwiftHUDBridge:
                     stderr=subprocess.PIPE,
                     text=True,
                     bufsize=1,
+                    env=env,
                 )
             except Exception as exc:
                 print(f"[HUD] Swift HUD launch failed: {exc}", file=sys.stderr)
@@ -902,7 +911,9 @@ class NotchHUD:
         clock_time, clock_date = _format_clock(datetime.now())
         color = STATE_COLORS.get(self._state, (1.0, 1.0, 1.0, 1.0))
         battery_percent, battery_charging = (None, False)
-        if visual == "idle_pinned" and self._show_battery:
+        # idle_peek shows a battery "ear" flanking the notch, so it needs the
+        # live percentage too — not just the pinned panel.
+        if visual in ("idle_pinned", "idle_peek") and self._show_battery:
             battery_percent, battery_charging = _battery_status()
             self._battery = "" if battery_percent is None else \
                 f"{'⚡' if battery_charging else '🔋'} {battery_percent}%"

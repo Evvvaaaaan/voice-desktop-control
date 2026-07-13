@@ -6,8 +6,12 @@ from setuptools import find_packages, setup
 
 APP = ["main.py"]
 SWIFT_HUD_SOURCE = "ui/swift_hud/VoiceDeskHUD.swift"
+SWIFT_HUD_FONT = "ui/swift_hud/PretendardVariable.ttf"
 SWIFT_HUD_BINARY = "build/VoiceDeskHUD"
-DATA_FILES = [("", ["config.yaml"]), ("swift_hud", [SWIFT_HUD_SOURCE])]
+DATA_FILES = [
+    ("", ["config.yaml"]),
+    ("swift_hud", [SWIFT_HUD_SOURCE, SWIFT_HUD_FONT]),
+]
 OPTIONS = {
     "argv_emulation": False,
     "packages": [
@@ -58,7 +62,7 @@ setup(
     packages=find_packages(exclude=("tests*", "build*", "dist*", "data*")),
     py_modules=["main"],
     include_package_data=False,
-    package_data={"ui.swift_hud": ["VoiceDeskHUD.swift"]},
+    package_data={"ui.swift_hud": ["VoiceDeskHUD.swift", "PretendardVariable.ttf"]},
     data_files=DATA_FILES,
     options={"py2app": OPTIONS},
     **SETUP_KWARGS,

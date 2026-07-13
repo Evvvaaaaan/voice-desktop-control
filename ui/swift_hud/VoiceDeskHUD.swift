@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 import SwiftUI
 
 private struct ProviderColumn: Identifiable {
@@ -138,10 +139,26 @@ private struct VisualSize {
     let width: CGFloat
     let totalHeight: CGFloat
     let contentHeight: CGFloat
+    // Width of the physical notch on this screen (0 when the display has none).
+    // The idle_peek "ears" use it to reserve a center gap so their glanceable
+    // content (clock / battery) never hides behind the hardware notch.
+    var notchWidth: CGFloat = 0
 }
 
-private let collapsedExtraWidth: CGFloat = 24
-private let collapsedLip: CGFloat = 8
+/// The collapsed idle pill hides *behind* the physical notch: sized 2pt inside
+/// each edge so anti-aliasing/rounding never lets a black "ear" peek past the
+/// hardware notch. Hover (idle_peek) then grows it out; see visualSize.
+private let collapsedNotchInset: CGFloat = 4
+/// Collapsed idle size on a display with NO physical notch. A hardware notch
+/// costs zero space (it hides behind the bezel); simulating a big notch on
+/// notchless hardware would instead permanently occupy the top-center. So idle
+/// here is a small, low handle flush to the top edge — enough to signal "the app
+/// is here" and act as a hover target — that grows to the peek/panel on hover.
+private let collapsedHandleSize = CGSize(width: 110, height: 7)
+/// Hover peek width on a display with NO physical notch: the "ears" metaphor
+/// needs a notch to flank, so without one the peek is a compact centered chip
+/// (clock · battery) whose pill hugs that content instead of a wide empty bar.
+private let compactPeekWidth: CGFloat = 210
 /// Design tokens — a single source for the HUD's type scale, 4pt spacing
 /// rhythm, corner radii, and the surface/text colors that sit on the flat
 /// black pill. Every view stays on these values so the panel reads as one
@@ -172,12 +189,37 @@ private enum T {
     static let hairline = Color.white.opacity(0.08)
     static let control = Color.white.opacity(0.13)
 
-    // type scale
-    static let display = Font.system(size: 21, weight: .semibold, design: .rounded)
-    static let title = Font.system(size: 13.5, weight: .semibold)
-    static let body = Font.system(size: 12.5, weight: .medium)
-    static let label = Font.system(size: 10.5, weight: .semibold)
-    static let caption = Font.system(size: 10.5, weight: .medium)
+    // Pretendard is the single typeface for the whole HUD (Korean + Latin in
+    // one family), so text reads as one system. Every `.font(...)` in the HUD
+    // routes through `T.font` / the tokens below — never Font.system — EXCEPT
+    // SF Symbol images, which must stay on Font.system since Pretendard has no
+    // symbol glyphs. We name an explicit per-weight PostScript face rather than
+    // Font.custom(...).weight(...) because SwiftUI's synthetic weighting on a
+    // variable font is unreliable. If the face isn't registered, Font.custom
+    // falls back to the system font and the HUD still renders.
+    static func font(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+        Font.custom(pretendardFace(weight), size: size)
+    }
+
+    private static func pretendardFace(_ w: Font.Weight) -> String {
+        switch w {
+        case .ultraLight, .thin: return "PretendardVariable-Thin"
+        case .light:             return "PretendardVariable-Light"
+        case .medium:            return "PretendardVariable-Medium"
+        case .semibold:          return "PretendardVariable-SemiBold"
+        case .bold:              return "PretendardVariable-Bold"
+        case .heavy:             return "PretendardVariable-ExtraBold"
+        case .black:             return "PretendardVariable-Black"
+        default:                 return "PretendardVariable-Regular"
+        }
+    }
+
+    // type scale — one ladder, shared by every text surface
+    static let display = font(21, .semibold)
+    static let title   = font(13.5, .semibold)
+    static let body    = font(12.5, .medium)
+    static let label   = font(10.5, .semibold)
+    static let caption = font(10.5, .medium)
 
     // one spring for every surface transition, so motion feels of a piece
     static let spring = Animation.spring(response: 0.4, dampingFraction: 0.82)
@@ -188,25 +230,49 @@ private func visualSize(for snapshot: HUDSnapshot, screen: NSScreen) -> VisualSi
     let baseHeight = snapshot.baseHeight
     let topInset = screen.safeAreaInsets.top
 
+    // Physical notch width on this screen (0 when the display has none), carried
+    // on every VisualSize so views can reason about the hardware notch.
+    let leftWidth = screen.auxiliaryTopLeftArea?.width ?? 0
+    let rightWidth = screen.auxiliaryTopRightArea?.width ?? 0
+    let hasNotch = topInset > 0 && leftWidth > 0 && rightWidth > 0
+    let notchWidth = hasNotch ? screen.frame.width - leftWidth - rightWidth : 0
+
     if snapshot.visual == "idle_collapsed" {
-        let leftWidth = screen.auxiliaryTopLeftArea?.width ?? 0
-        let rightWidth = screen.auxiliaryTopRightArea?.width ?? 0
-        let notchWidth = screen.frame.width - leftWidth - rightWidth
-        if topInset > 0, notchWidth > 0 {
-            let height = topInset + collapsedLip
+        if hasNotch, notchWidth > 0 {
+            // Physical notch present: tuck the collapsed pill just inside it so
+            // idle reads as the bare hardware notch. Hover expands to idle_peek.
+            let width = notchWidth - collapsedNotchInset
             return VisualSize(
-                width: notchWidth + collapsedExtraWidth,
-                totalHeight: height,
-                contentHeight: height
+                width: width,
+                totalHeight: topInset,
+                contentHeight: topInset,
+                notchWidth: notchWidth
             )
         }
-        return VisualSize(width: baseWidth, totalHeight: baseHeight, contentHeight: baseHeight)
+        // No physical notch: a small top-edge handle rather than a permanent
+        // black block, since there is no bezel to hide an idle notch behind.
+        return VisualSize(
+            width: collapsedHandleSize.width,
+            totalHeight: collapsedHandleSize.height,
+            contentHeight: collapsedHandleSize.height
+        )
+    }
+
+    if snapshot.visual == "idle_peek", !hasNotch {
+        // No hardware notch to flank: shrink the peek to a compact centered chip
+        // instead of a wide bar with an empty middle.
+        return VisualSize(
+            width: compactPeekWidth,
+            totalHeight: baseHeight,
+            contentHeight: baseHeight
+        )
     }
 
     return VisualSize(
         width: baseWidth,
         totalHeight: baseHeight,
-        contentHeight: baseHeight
+        contentHeight: baseHeight,
+        notchWidth: notchWidth
     )
 }
 
@@ -255,7 +321,7 @@ private struct CapsuleButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 12, weight: .semibold))
+            .font(T.font(12, .semibold))
             .padding(.horizontal, 18)
             .padding(.vertical, 7)
             .background(
@@ -338,10 +404,11 @@ private struct TextInputView: View {
     var body: some View {
         VStack(spacing: 8) {
             Text(prompt)
-                .font(.system(size: 11))
+                .font(T.font(11))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             TextField("입력할 내용", text: $draft)
+                .font(T.font(13))
                 .textFieldStyle(.roundedBorder)
                 .focused($focused)
                 .onSubmit { emit("textSubmit", ["text": draft]) }
@@ -526,11 +593,7 @@ private struct HUDView: View {
         case "idle_collapsed":
             Color.clear
         case "idle_peek":
-            Text(snapshot.providerSummary)
-                .font(T.body)
-                .foregroundStyle(T.ink)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            peekEars
         case "idle_pinned":
             pinnedPanel
         case "listening":
@@ -541,6 +604,68 @@ private struct HUDView: View {
             TextInputView(prompt: snapshot.inputPrompt, prefill: snapshot.inputPrefill, emit: emit)
         default:
             stateLabel
+        }
+    }
+
+    /// Hover peek content. With a physical notch, clock and battery sit as two
+    /// glanceable "ears" flanking it (iPhone Dynamic Island idle style), a center
+    /// gap the width of the hardware notch keeping both clear of it. WITHOUT a
+    /// notch there is nothing to flank, so they group into one compact centered
+    /// chip (clock · battery) — see visualSize's compactPeekWidth.
+    @ViewBuilder
+    private var peekEars: some View {
+        Group {
+            if size.notchWidth > 0 {
+                HStack(spacing: 0) {
+                    clockLabel
+                    Spacer(minLength: size.notchWidth)
+                    batteryLabel
+                }
+            } else {
+                HStack(spacing: T.space2) {
+                    clockLabel
+                    if showsPeekDivider {
+                        Circle()
+                            .fill(T.ink3)
+                            .frame(width: 2.5, height: 2.5)
+                    }
+                    batteryLabel
+                }
+            }
+        }
+        .padding(.horizontal, T.space4)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var showsPeekDivider: Bool {
+        snapshot.showClock && !snapshot.clockTime.isEmpty && snapshot.batteryPercent != nil
+    }
+
+    @ViewBuilder
+    private var clockLabel: some View {
+        if snapshot.showClock, !snapshot.clockTime.isEmpty {
+            Text(snapshot.clockTime)
+                .font(T.body)
+                .foregroundStyle(T.ink)
+                .monospacedDigit()
+                .lineLimit(1)
+        }
+    }
+
+    @ViewBuilder
+    private var batteryLabel: some View {
+        if let pct = snapshot.batteryPercent {
+            HStack(spacing: T.space1 - 1) {
+                Image(systemName: batterySymbol(pct))
+                    .font(.system(size: 12))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(batteryColor(pct))
+                Text("\(pct)%")
+                    .font(T.body)
+                    .foregroundStyle(T.ink)
+                    .monospacedDigit()
+                    .lineLimit(1)
+            }
         }
     }
 
@@ -829,11 +954,13 @@ private struct HUDView: View {
                 }
             }
 
+            Spacer(minLength: T.space2)
+
             HStack(spacing: T.space1) {
                 Image(systemName: "chevron.up")
                     .font(.system(size: 8, weight: .bold))
                 Text("다시 클릭하면 접힙니다")
-                    .font(.system(size: 9.5, weight: .medium))
+                    .font(T.font(9.5, .medium))
                     .tracking(0.3)
             }
             .foregroundStyle(T.ink3)
@@ -1306,6 +1433,26 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
     }
 }
+
+/// Register the bundled Pretendard variable font so `Font.custom` resolves it
+/// even when the user hasn't installed Pretendard system-wide. The .ttf path is
+/// handed down by the Python launcher (VOICEDESK_HUD_FONT); we also probe the
+/// standard user Fonts dir for local dev runs. Silent no-op on failure — the
+/// type tokens then fall back to the system font and the HUD still renders.
+private func registerPretendard() {
+    var candidates: [String] = []
+    if let p = ProcessInfo.processInfo.environment["VOICEDESK_HUD_FONT"], !p.isEmpty {
+        candidates.append(p)
+    }
+    candidates.append(NSString(string: "~/Library/Fonts/PretendardVariable.ttf").expandingTildeInPath)
+    for path in candidates where FileManager.default.fileExists(atPath: path) {
+        let url = URL(fileURLWithPath: path) as CFURL
+        CTFontManagerRegisterFontsForURL(url, .process, nil)
+        break
+    }
+}
+
+registerPretendard()
 
 private let controller = HUDController()
 private let app = NSApplication.shared
