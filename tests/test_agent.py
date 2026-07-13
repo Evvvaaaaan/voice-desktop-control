@@ -1089,3 +1089,249 @@ def test_routine_offer_listen_failure_never_breaks_command(mocker):
 
     assert result == "열었어요"
     routines.save.assert_not_called()
+
+
+# ---------- window-use dispatch ----------
+
+def test_dispatch_read_screen_returns_listing(mocker):
+    mocker.patch(
+        "actions.accessibility.snapshot_screen",
+        return_value='현재 앱: TestApp\n[1] 버튼 "확인"',
+    )
+    res = dispatch("read_screen", {})
+    assert res.startswith("현재 앱: TestApp")
+    assert '[1] 버튼 "확인"' in res
+
+
+def test_dispatch_click_element_falls_back_to_mouse(mocker):
+    mocker.patch("actions.accessibility.element_known", return_value=True)
+    mocker.patch("actions.accessibility.press_element", return_value=None)
+    mocker.patch("actions.accessibility.element_center", return_value=(120.0, 240.0))
+    mock_click = mocker.patch("agent.tools.click")
+    res = dispatch("click_element", {"id": 2})
+    mock_click.assert_called_once_with(120, 240)
+    assert res == "clicked element 2 at 120,240 (mouse fallback)"
+
+
+def test_dispatch_click_element_double_falls_back_to_mouse(mocker):
+    mocker.patch("actions.accessibility.element_known", return_value=True)
+    mocker.patch("actions.accessibility.press_element", return_value=None)
+    mocker.patch("actions.accessibility.element_center", return_value=(10.0, 20.0))
+    mock_double = mocker.patch("agent.tools.double_click")
+    res = dispatch("click_element", {"id": 1, "double": True})
+    mock_double.assert_called_once_with(10, 20)
+    assert res == "double_clicked element 1 at 10,20 (mouse fallback)"
+
+
+def test_dispatch_click_element_unknown_id(mocker):
+    mocker.patch("actions.accessibility.element_known", return_value=False)
+    res = dispatch("click_element", {"id": 99})
+    assert res.startswith("error: 알 수 없는 요소 id 99")
+
+
+def test_dispatch_click_element_stale_element(mocker):
+    mocker.patch("actions.accessibility.element_known", return_value=True)
+    mocker.patch("actions.accessibility.press_element", return_value=None)
+    mocker.patch("actions.accessibility.element_center", return_value=None)
+    res = dispatch("click_element", {"id": 3})
+    assert res.startswith("error: 요소 3")
+
+
+def test_dispatch_click_element_requires_int_id():
+    res = dispatch("click_element", {"id": "abc"})
+    assert res.startswith("error: click_element")
+
+
+# ---------- window-use agent loop integration ----------
+
+def _mk_agent(mock_llm):
+    guard = MagicMock()
+    guard.check.return_value = True
+    guard.is_dangerous.return_value = False
+    detector = MagicMock()
+    detector.record.return_value = False
+    return Agent(mock_llm, guard, MagicMock(), detector,
+                 MagicMock(voice="Yuna", rate=200))
+
+
+def test_click_element_observation_is_text_with_fresh_elements(mocker):
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = True   # vision model still gets TEXT here
+    mock_llm.complete.side_effect = [
+        '{"action":"click_element","params":{"id":3},"done":false,"response":"클릭"}',
+        '{"action":"speak_only","params":{},"done":true,"response":"완료"}',
+    ]
+    agent = _mk_agent(mock_llm)
+    mocker.patch("agent.core.tools.dispatch",
+                 return_value="clicked element 3 at 100,200")
+    mocker.patch("agent.core.run_applescript", return_value="TestApp")
+    mocker.patch("agent.core.snapshot_screen", return_value='[1] 버튼 "확인"')
+    mocker.patch("agent.core.time.sleep")
+    mocker.patch("agent.core.speak")
+
+    agent.run("확인 눌러줘")
+
+    # messages is mutated in place after the call, so locate the observation
+    # message instead of relying on list position.
+    messages = mock_llm.complete.call_args_list[1][0][0]
+    obs_msgs = [m for m in messages
+                if m["role"] == "user" and "관찰" in str(m.get("content", ""))]
+    assert obs_msgs, "no observation message found"
+    assert '버튼 "확인"' in obs_msgs[-1]["content"]
+    mock_llm.build_observation.assert_not_called()
+
+
+def test_read_screen_observation_is_text_only(mocker):
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = True
+    listing = '현재 앱: TestApp\n[1] 버튼 "확인"'
+    mock_llm.complete.side_effect = [
+        '{"action":"read_screen","params":{},"done":false,"response":"확인 중"}',
+        '{"action":"speak_only","params":{},"done":true,"response":"완료"}',
+    ]
+    agent = _mk_agent(mock_llm)
+    mocker.patch("agent.core.tools.dispatch", return_value=listing)
+    mocker.patch("agent.core.run_applescript", return_value="TestApp")
+    mocker.patch("agent.core.speak")
+
+    agent.run("화면 읽어줘")
+
+    messages = mock_llm.complete.call_args_list[1][0][0]
+    obs_msgs = [m for m in messages
+                if m["role"] == "user" and "관찰" in str(m.get("content", ""))]
+    assert obs_msgs, "no observation message found"
+    assert '[1] 버튼 "확인"' in obs_msgs[-1]["content"]
+    mock_llm.build_observation.assert_not_called()
+
+
+def test_click_element_is_never_hot_cached(mocker):
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.return_value = (
+        '{"action":"click_element","params":{"id":1},"done":true,"response":"눌렀어요"}'
+    )
+    agent = _mk_agent(mock_llm)
+    mocker.patch("agent.core.tools.dispatch",
+                 return_value="clicked element 1 at 5,5")
+    mocker.patch("agent.core.speak")
+    record = mocker.patch.object(agent._cache, "record")
+
+    agent.run("확인 눌러줘")
+
+    record.assert_not_called()
+
+
+def test_system_prompt_documents_window_use():
+    from agent.context import SYSTEM_PROMPT
+    assert "read_screen" in SYSTEM_PROMPT
+    assert "click_element" in SYSTEM_PROMPT
+    assert "set_value" in SYSTEM_PROMPT
+    # screenshot flow must remain documented as the fallback
+    assert "screenshot" in SYSTEM_PROMPT
+    assert "0-1000" in SYSTEM_PROMPT or "0–1000" in SYSTEM_PROMPT
+
+
+# ---------- independent actuation dispatch ----------
+
+def test_dispatch_click_element_prefers_ax_press(mocker):
+    mocker.patch("actions.accessibility.element_known", return_value=True)
+    mocker.patch("actions.accessibility.press_element",
+                 return_value="pressed element 2 (AXPress)")
+    mock_click = mocker.patch("agent.tools.click")
+    res = dispatch("click_element", {"id": 2})
+    assert res == "pressed element 2 (AXPress)"
+    mock_click.assert_not_called()
+
+
+def test_dispatch_set_value(mocker):
+    mock_set = mocker.patch("actions.accessibility.set_element_value",
+                            return_value="value set on element 3")
+    res = dispatch("set_value", {"id": 3, "text": "안녕"})
+    mock_set.assert_called_once_with(3, "안녕")
+    assert res == "value set on element 3"
+
+
+def test_dispatch_set_value_requires_id_and_text(mocker):
+    assert dispatch("set_value", {"text": "x"}).startswith("error: set_value")
+    assert dispatch("set_value", {"id": 1}).startswith("error: set_value")
+
+
+def test_dispatch_set_value_long_text_uses_confirm_gate(mocker):
+    from agent import tools
+    mock_set = mocker.patch("actions.accessibility.set_element_value",
+                            return_value="value set on element 1")
+    tools.set_text_input_provider(lambda prompt, draft: "수정된 텍스트입니다 열자넘음")
+    try:
+        res = dispatch("set_value", {"id": 1, "text": "가나다라마바사아자차카"})
+    finally:
+        tools.set_text_input_provider(None)
+    mock_set.assert_called_once_with(1, "수정된 텍스트입니다 열자넘음")
+    assert res == "value set on element 1"
+
+
+def test_dispatch_launch_app_pins_target(mocker):
+    mocker.patch("agent.tools.run_applescript", return_value="")
+    mock_pin = mocker.patch("actions.accessibility.set_target_app")
+    dispatch("launch_app", {"app": "Safari"})
+    mock_pin.assert_called_once_with("Safari")
+
+
+def test_dispatch_launch_app_does_not_pin_on_error(mocker):
+    mocker.patch("agent.tools.run_applescript", return_value="error: no such app")
+    mock_pin = mocker.patch("actions.accessibility.set_target_app")
+    dispatch("launch_app", {"app": "NopeApp"})
+    mock_pin.assert_not_called()
+
+
+# ---------- independent actuation loop integration ----------
+
+def test_run_clears_target_app_each_command(mocker):
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.return_value = (
+        '{"action":"speak_only","params":{},"done":true,"response":"네"}'
+    )
+    agent = _mk_agent(mock_llm)
+    mocker.patch("agent.core.tools.dispatch", return_value="")
+    mocker.patch("agent.core.speak")
+    mock_clear = mocker.patch("agent.core.clear_target_app")
+    agent.run("안녕")
+    mock_clear.assert_called_once()
+
+
+def test_set_value_observation_is_text_with_fresh_elements(mocker):
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = True
+    mock_llm.complete.side_effect = [
+        '{"action":"set_value","params":{"id":2,"text":"hi"},"done":false,"response":"입력"}',
+        '{"action":"speak_only","params":{},"done":true,"response":"완료"}',
+    ]
+    agent = _mk_agent(mock_llm)
+    mocker.patch("agent.core.tools.dispatch", return_value="value set on element 2")
+    mocker.patch("agent.core.run_applescript", return_value="TestApp")
+    mocker.patch("agent.core.snapshot_screen", return_value='[1] 버튼 "확인"')
+    mocker.patch("agent.core.time.sleep")
+    mocker.patch("agent.core.speak")
+
+    agent.run("주소창에 입력해줘")
+
+    messages = mock_llm.complete.call_args_list[1][0][0]
+    obs_msgs = [m for m in messages
+                if m["role"] == "user" and "관찰" in str(m.get("content", ""))]
+    assert obs_msgs, "no observation message found"
+    assert '버튼 "확인"' in obs_msgs[-1]["content"]
+    mock_llm.build_observation.assert_not_called()
+
+
+def test_set_value_is_never_hot_cached(mocker):
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.return_value = (
+        '{"action":"set_value","params":{"id":1,"text":"x"},"done":true,"response":"입력했어요"}'
+    )
+    agent = _mk_agent(mock_llm)
+    mocker.patch("agent.core.tools.dispatch", return_value="value set on element 1")
+    mocker.patch("agent.core.speak")
+    record = mocker.patch.object(agent._cache, "record")
+    agent.run("입력해줘")
+    record.assert_not_called()

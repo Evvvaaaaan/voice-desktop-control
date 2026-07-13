@@ -383,3 +383,210 @@ def test_double_click_waits_for_ui_to_settle(mocker):
     mock_sleep = mocker.patch.object(mk.time, "sleep")
     mk.double_click(100, 100)
     mock_sleep.assert_called_once()
+
+
+# ---------- AX window-use snapshot ----------
+
+def _fake_tree():
+    """dict-based fake AX tree. _patch_ax wires accessors to read these dicts."""
+    btn = {"AXRole": "AXButton", "AXTitle": "확인", "center": (100.0, 200.0)}
+    field = {
+        "AXRole": "AXTextField", "AXTitle": "주소창",
+        "AXValue": "mail.google.com", "center": (300.0, 50.0),
+    }
+    group = {"AXRole": "AXGroup", "AXChildren": [btn, field]}
+    window = {"AXRole": "AXWindow", "AXTitle": "테스트 창", "AXChildren": [group]}
+    return window, btn, field
+
+
+def _patch_ax(monkeypatch, window, trusted=True, app_name="TestApp"):
+    from actions import accessibility as ax
+    ax.clear_target_app()
+    monkeypatch.setattr(ax, "_ax_trusted", lambda: trusted)
+    monkeypatch.setattr(ax, "_frontmost_app", lambda: (app_name, 123))
+    monkeypatch.setattr(ax, "_running_apps", lambda: [(app_name, 123)])
+    monkeypatch.setattr(ax, "_ax_app", lambda pid: {"AXWindows": [window]})
+    monkeypatch.setattr(ax, "_ax_attr", lambda elem, name: elem.get(name))
+    monkeypatch.setattr(ax, "_ax_center", lambda elem: elem.get("center"))
+    monkeypatch.setattr(ax, "_ax_actions", lambda elem: elem.get("actions", []))
+    monkeypatch.setattr(ax, "_ax_perform",
+                        lambda elem, action: elem.get("perform_ok", True))
+    monkeypatch.setattr(ax, "_ax_settable",
+                        lambda elem, name: elem.get("settable", False))
+    monkeypatch.setattr(
+        ax, "_ax_set",
+        lambda elem, name, v: (elem.setdefault("set_values", []).append(v), True)[1],
+    )
+
+
+def test_snapshot_lists_interactive_elements_numbered(monkeypatch):
+    from actions.accessibility import snapshot_screen
+    window, _, _ = _fake_tree()
+    _patch_ax(monkeypatch, window)
+    text = snapshot_screen()
+    assert text.startswith('현재 앱: TestApp — 창: "테스트 창"')
+    assert '[1] 버튼 "확인"' in text
+    assert '[2] 텍스트필드 "주소창" 값="mail.google.com"' in text
+
+
+def test_snapshot_error_without_ax_trust(monkeypatch):
+    from actions.accessibility import snapshot_screen
+    window, _, _ = _fake_tree()
+    _patch_ax(monkeypatch, window, trusted=False)
+    text = snapshot_screen()
+    assert text.startswith("error: 접근성 권한")
+
+
+def test_snapshot_advises_screenshot_fallback_when_few_elements(monkeypatch):
+    from actions.accessibility import snapshot_screen
+    window, _, _ = _fake_tree()   # only 2 interactive elements (< 5)
+    _patch_ax(monkeypatch, window)
+    text = snapshot_screen()
+    assert "screenshot" in text
+
+
+def test_snapshot_caps_listed_elements(monkeypatch):
+    from actions.accessibility import snapshot_screen
+    buttons = [
+        {"AXRole": "AXButton", "AXTitle": f"b{i}", "center": (10.0, 10.0)}
+        for i in range(200)
+    ]
+    window = {"AXRole": "AXWindow", "AXTitle": "많음", "AXChildren": buttons}
+    _patch_ax(monkeypatch, window)
+    text = snapshot_screen()
+    assert "[150]" in text
+    assert "[151]" not in text
+
+
+def test_snapshot_skips_elements_without_geometry(monkeypatch):
+    from actions.accessibility import snapshot_screen
+    ghost = {"AXRole": "AXButton", "AXTitle": "유령"}   # no center -> zero-size
+    real = {"AXRole": "AXButton", "AXTitle": "실재", "center": (5.0, 5.0)}
+    window = {"AXRole": "AXWindow", "AXChildren": [ghost, real]}
+    _patch_ax(monkeypatch, window)
+    text = snapshot_screen()
+    assert "유령" not in text
+    assert '[1] 버튼 "실재"' in text
+
+
+def test_new_snapshot_invalidates_previous_ids(monkeypatch):
+    from actions.accessibility import snapshot_screen, element_known
+    window, _, _ = _fake_tree()
+    _patch_ax(monkeypatch, window)
+    snapshot_screen()
+    assert element_known(1) is True
+    empty = {"AXRole": "AXWindow", "AXChildren": []}
+    _patch_ax(monkeypatch, empty)
+    snapshot_screen()
+    assert element_known(1) is False
+
+
+def test_element_center_is_fresh_at_click_time(monkeypatch):
+    from actions.accessibility import snapshot_screen, element_center
+    window, btn, _ = _fake_tree()
+    _patch_ax(monkeypatch, window)
+    snapshot_screen()
+    btn["center"] = (555.0, 666.0)   # window moved after the snapshot
+    assert element_center(1) == (555.0, 666.0)
+
+
+def test_element_center_none_when_element_gone(monkeypatch):
+    from actions.accessibility import snapshot_screen, element_center
+    window, btn, _ = _fake_tree()
+    _patch_ax(monkeypatch, window)
+    snapshot_screen()
+    del btn["center"]                # element no longer resolves
+    assert element_center(1) is None
+
+
+# ---------- independent actuation (AXPress / AXSetValue / target pinning) ----------
+
+def test_press_element_uses_ax_action(monkeypatch):
+    from actions.accessibility import snapshot_screen, press_element
+    window, btn, _ = _fake_tree()
+    btn["actions"] = ["AXPress"]
+    _patch_ax(monkeypatch, window)
+    snapshot_screen()
+    assert press_element(1) == "pressed element 1 (AXPress)"
+
+
+def test_press_element_none_without_ax_action(monkeypatch):
+    from actions.accessibility import snapshot_screen, press_element
+    window, btn, _ = _fake_tree()
+    btn["actions"] = []
+    _patch_ax(monkeypatch, window)
+    snapshot_screen()
+    assert press_element(1) is None
+
+
+def test_press_element_double_prefers_axopen(monkeypatch):
+    from actions.accessibility import snapshot_screen, press_element
+    window, btn, _ = _fake_tree()
+    btn["actions"] = ["AXPress", "AXOpen"]
+    _patch_ax(monkeypatch, window)
+    snapshot_screen()
+    assert press_element(1, double=True) == "pressed element 1 (AXOpen)"
+
+
+def test_press_element_none_when_perform_fails(monkeypatch):
+    from actions.accessibility import snapshot_screen, press_element
+    window, btn, _ = _fake_tree()
+    btn["actions"] = ["AXPress"]
+    btn["perform_ok"] = False
+    _patch_ax(monkeypatch, window)
+    snapshot_screen()
+    assert press_element(1) is None
+
+
+def test_set_element_value_success(monkeypatch):
+    from actions.accessibility import snapshot_screen, set_element_value
+    window, _, field = _fake_tree()
+    field["settable"] = True
+    _patch_ax(monkeypatch, window)
+    snapshot_screen()
+    assert set_element_value(2, "hello") == "value set on element 2"
+    assert field["set_values"] == ["hello"]
+
+
+def test_set_element_value_not_settable(monkeypatch):
+    from actions.accessibility import snapshot_screen, set_element_value
+    window, _, field = _fake_tree()
+    _patch_ax(monkeypatch, window)
+    snapshot_screen()
+    assert set_element_value(2, "hello").startswith("error: 이 요소에는")
+
+
+def test_snapshot_uses_pinned_target_not_frontmost(monkeypatch):
+    from actions import accessibility as ax
+    window, _, _ = _fake_tree()
+    _patch_ax(monkeypatch, window)
+    seen_pids = []
+    monkeypatch.setattr(
+        ax, "_ax_app", lambda pid: seen_pids.append(pid) or {"AXWindows": [window]}
+    )
+    assert ax.set_target_app("TestApp") is True
+    # user switches to another app — snapshot must ignore the frontmost
+    monkeypatch.setattr(ax, "_frontmost_app", lambda: ("OtherApp", 999))
+    text = ax.snapshot_screen()
+    assert text.startswith("현재 앱: TestApp")
+    assert seen_pids == [123]
+
+
+def test_snapshot_pins_first_app_without_explicit_target(monkeypatch):
+    from actions import accessibility as ax
+    window, _, _ = _fake_tree()
+    _patch_ax(monkeypatch, window)
+    ax.snapshot_screen()                      # pins TestApp (123)
+    monkeypatch.setattr(ax, "_frontmost_app", lambda: ("OtherApp", 999))
+    text = ax.snapshot_screen()
+    assert text.startswith("현재 앱: TestApp")
+
+
+def test_snapshot_errors_when_target_app_gone(monkeypatch):
+    from actions import accessibility as ax
+    window, _, _ = _fake_tree()
+    _patch_ax(monkeypatch, window)
+    assert ax.set_target_app("TestApp") is True
+    monkeypatch.setattr(ax, "_running_apps", lambda: [])
+    text = ax.snapshot_screen()
+    assert text.startswith("error: 대상 앱")
