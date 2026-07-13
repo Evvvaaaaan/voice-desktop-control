@@ -1,6 +1,8 @@
 # ui/settings/page_tts.py
 from config.loader import Config
-from ui.settings.actions import make_action_handler, wire_action
+from ui.settings.actions import make_action_handler, wire_action, make_link_button
+
+NVIDIA_TTS_KEY_URL = "https://build.nvidia.com/resembleai/chatterbox-multilingual-tts"
 
 _LBL_W = 155
 _CTRL_X = 172
@@ -118,9 +120,15 @@ class _TTSPageBuilder:
         v = _cat(self._parent, "API 키:", y1); self._nvidia_views.append(v)
         self._nvidia_key = _secure_field(self._parent, self._config.tts.nvidia_api_key, y1)
         self._nvidia_views.append(self._nvidia_key)
+        v, self._nvidia_key_link_handler = make_link_button(
+            self._parent, "발급받기", NVIDIA_TTS_KEY_URL, _CTRL_X + 306, y1)
+        self._nvidia_views.append(v)
         v = _cat(self._parent, "Function ID:", y2); self._nvidia_views.append(v)
         self._nvidia_function_id = _field(self._parent, self._config.tts.nvidia_function_id, y2, w=280)
         self._nvidia_views.append(self._nvidia_function_id)
+        v, self._nvidia_fid_link_handler = make_link_button(
+            self._parent, "Deploy 탭", NVIDIA_TTS_KEY_URL, _CTRL_X + 286, y2)
+        self._nvidia_views.append(v)
         v = _cat(self._parent, "음성:", y3); self._nvidia_views.append(v)
         self._nvidia_voice = _field(self._parent, self._config.tts.nvidia_voice, y3, w=280)
         self._nvidia_views.append(self._nvidia_voice)
