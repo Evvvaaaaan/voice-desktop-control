@@ -54,6 +54,16 @@ def test_check_dangerous_declined(mocker):
     assert result is False
 
 
+def test_check_dangerous_decline_containing_ne_is_denied(mocker):
+    """'아니요, 됐네요' contains the syllable '네' — a naive substring check
+    once approved it. A decline must deny, whatever syllables it contains."""
+    mocker.patch("safety.guard.speak")
+    mocker.patch("safety.guard._listen_for_confirmation",
+                 return_value="아니요, 됐네요")
+    guard = SafetyGuard(require_confirmation=True)
+    assert guard.check("delete_file", {"path": "/tmp/x"}) is False
+
+
 def test_confirmation_disabled_bypasses(mocker):
     mock_speak = mocker.patch("safety.guard.speak")
     guard = SafetyGuard(require_confirmation=False)

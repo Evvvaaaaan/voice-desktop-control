@@ -53,6 +53,11 @@ from routines.manager import RoutineManager
 from activation.hotkey import HotkeyListener
 from activation.wake_word import WakeWordListener
 from agent.core import Agent
+from memory.store import MemoryStore
+from memory.embedder import get_embedder
+from memory.retriever import MemoryRetriever
+from memory.summarizer import DailySummarizer
+from memory.suggester import SuggestionEngine
 from ui.notch_hud import NotchHUD
 from ui.menubar import VoiceDeskMenuBar
 from ui.settings.window import SettingsWindow
@@ -71,8 +76,29 @@ def _default_state_dir() -> str:
     return os.path.join(os.path.expanduser("~"), ".voicedesk")
 
 
+def _project_config_path() -> str | None:
+    """In a dev run (`python3 main.py` from the repo checkout), prefer the
+    repo's own config.yaml over the per-user copy in STATE_DIR — otherwise
+    edits to it silently do nothing: the first run seeds STATE_DIR's
+    config.yaml from Config() defaults, and every run after that reads and
+    (via the Settings UI) writes that copy instead, never the repo file.
+
+    The packaged .app (py2app sets sys.frozen) always keeps using STATE_DIR:
+    its bundled config.yaml lives inside the app bundle, which must stay
+    read-only/untouched (settings belong in Application Support, not in a
+    signed bundle)."""
+    if getattr(sys, "frozen", False):
+        return None
+    candidate = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
+    return candidate if os.path.exists(candidate) else None
+
+
 STATE_DIR = _default_state_dir()
-CONFIG_PATH = os.environ.get("VOICEDESK_CONFIG", os.path.join(STATE_DIR, "config.yaml"))
+CONFIG_PATH = (
+    os.environ.get("VOICEDESK_CONFIG")
+    or _project_config_path()
+    or os.path.join(STATE_DIR, "config.yaml")
+)
 DB_PATH = os.environ.get("VOICEDESK_DB", os.path.join(STATE_DIR, "command_history.db"))
 ROUTINES_PATH = os.environ.get("VOICEDESK_ROUTINES", os.path.join(STATE_DIR, "routines.json"))
 
@@ -269,7 +295,7 @@ def main():
     llm = get_llm_adapter(config)
     collector = MetricsCollector(DB_PATH)
     detector = RoutineDetector(DB_PATH)
-    manager = RoutineManager(ROUTINES_PATH)  # noqa: F841  initialises routines.json
+    manager = RoutineManager(ROUTINES_PATH)
 
     hud = NotchHUD()
     hud.set_widgets(config.hud.show_clock, config.hud.show_media, config.hud.show_battery,
@@ -282,8 +308,61 @@ def main():
     hud.set_state("idle")
     hud.set_provider_info(*_provider_info(config))
 
+    memory_store = None
+    if config.memory.enabled:
+        try:
+            memory_store = MemoryStore(DB_PATH)
+        except Exception as e:
+            print(f"[Memory] store init failed ({e}); memory disabled.", file=sys.stderr)
+    embedder = get_embedder(config)
+    retriever = (MemoryRetriever(memory_store, embedder, top_k=config.memory.retrieval_top_k)
+                 if memory_store else None)
+
     agent = Agent(llm, guard, collector, detector, config.tts,
-                  on_state=hud.set_state)
+                  on_state=hud.set_state, memory=memory_store, retriever=retriever,
+                  routines=manager)
+
+    if memory_store:
+        DailySummarizer(memory_store, llm, embedder).start_background()
+
+    def _try_begin_session() -> bool:
+        return _COMMAND_LOCK.acquire(blocking=False)
+
+    def _end_session() -> None:
+        _COMMAND_LOCK.release()
+        # The user tried to speak during the suggestion — replay it, same as
+        # _record_command's finally block.
+        if _PENDING_ACTIVATION.is_set():
+            _PENDING_ACTIVATION.clear()
+            threading.Thread(
+                target=_record_command, args=(agent, hud, stt),
+                kwargs={"follow_up": config.activation.continuous}, daemon=True,
+            ).start()
+
+    def _run_suggested(command: str) -> None:
+        # The suggestion session already holds _COMMAND_LOCK; mirror
+        # _record_command's executing tail minus recording/lock.
+        hud.set_transcript(command)
+        hud.set_state("executing")
+        result = agent.run(command)
+        failed = (not result or result == "취소됨"
+                  or result.startswith(("error", "오류")))
+        hud.set_state("error" if failed else "success")
+        import time
+        time.sleep(1.5)
+        hud.set_transcript("")
+        hud.set_state("idle")
+
+    if memory_store and config.suggestion.enabled:
+        from actions.tts import speak as _suggest_speak
+        SuggestionEngine(
+            memory_store, config.suggestion,
+            speak_fn=lambda text: _suggest_speak(
+                text, config.tts.voice, config.tts.rate, tts_config=config.tts),
+            run_command_fn=_run_suggested,
+            begin_session=_try_begin_session, end_session=_end_session,
+            hud=hud,
+        ).start_background()
 
     def on_activation():
         t = threading.Thread(
@@ -298,6 +377,10 @@ def main():
         stt = get_stt_adapter(new_config)
         llm = get_llm_adapter(new_config)
         agent.set_llm(llm)
+        if memory_store:
+            agent.set_retriever(MemoryRetriever(
+                memory_store, get_embedder(new_config),
+                top_k=new_config.memory.retrieval_top_k))
         hud.set_provider_info(*_provider_info(new_config))
         hud.set_widgets(new_config.hud.show_clock, new_config.hud.show_media,
                         new_config.hud.show_battery, new_config.hud.hover_to_expand,

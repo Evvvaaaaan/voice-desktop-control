@@ -154,6 +154,17 @@ def test_dispatch_open_url_valid(mocker):
     assert "https://www.google.com/search?q=gmail" in mock_run.call_args[0][0]
 
 
+def test_dispatch_open_url_percent_encodes_non_ascii_query(mocker):
+    """AppleScript's `open location` mangles raw Korean bytes into mojibake
+    (reproduced manually via osascript) — the query must be percent-encoded
+    to plain ASCII before it reaches osascript."""
+    mock_run = mocker.patch("agent.tools.run_applescript", return_value="")
+    dispatch("open_url", {"url": "https://www.google.com/search?q=클로드+코드"})
+    called_script = mock_run.call_args[0][0]
+    assert "클로드" not in called_script
+    assert "%ED%81%B4%EB%A1%9C%EB%93%9C" in called_script
+
+
 def test_dispatch_open_url_rejects_non_http():
     result = dispatch("open_url", {"url": "file:///etc/passwd"})
     assert result.startswith("error: invalid url")
@@ -268,6 +279,49 @@ def test_agent_vision_provider_feeds_screenshot_for_screen_actions(mocker):
 
     mock_shot.assert_called()
     mock_llm.build_observation.assert_called_once()
+
+
+def test_non_vision_provider_click_rejected_without_moving_mouse(mocker):
+    """Observed with Ollama/llama3: a non-vision model has no screenshot to
+    read coordinates off, so click/move_mouse are pure guesses — it
+    "clicked the left edge" and "moved to the top edge" of nothing, then
+    claimed done. The action must be rejected before the real mouse moves,
+    and done=true must not go through on that rejected step."""
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.side_effect = [
+        '{"action": "click", "params": {"x": 0, "y": 0}, "done": true, "response": "클릭했어요"}',
+        '{"action": "speak_only", "params": {}, "done": true, "response": "화면을 볼 수 없어서 못했어요"}',
+    ]
+    agent = _make_agent(mock_llm)
+    mock_click = mocker.patch("agent.tools.click")
+    mocker.patch("agent.core.speak")
+
+    result = agent.run("왼쪽 위 눌러줘")
+
+    mock_click.assert_not_called()
+    assert result == "화면을 볼 수 없어서 못했어요"
+
+
+def test_vision_provider_click_still_dispatches(mocker):
+    """The guard must only block non-vision providers — a vision-capable
+    one (which actually gets a screenshot) clicks normally."""
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = True
+    mock_llm.build_observation.return_value = {"role": "user", "content": "obs"}
+    mock_llm.complete.return_value = (
+        '{"action": "click", "params": {"x": 500, "y": 500}, "done": true, "response": "클릭했어요"}'
+    )
+    agent = _make_agent(mock_llm)
+    mocker.patch("agent.core.take_screenshot_with_grid", return_value=b"png")
+    mock_click = mocker.patch("agent.tools.click")
+    mocker.patch("agent.tools.active_screen_rect", return_value=(0.0, 0.0, 1000.0, 1000.0))
+    mocker.patch("agent.core.speak")
+
+    result = agent.run("가운데 클릭해줘")
+
+    mock_click.assert_called_once()
+    assert result == "클릭했어요"
 
 
 def test_agent_set_llm_replaces_runtime_adapter():
@@ -468,6 +522,22 @@ def test_click_missing_coords_errors(mocker):
     assert tools.dispatch("move_mouse", {"x": 5}).startswith("error")
 
 
+def test_computer_use_actions_are_logged(mocker, capsys):
+    """Clicks and text input must show up in the console log so what the
+    computer-use loop actually did on screen is visible/auditable."""
+    from agent import tools
+    mocker.patch("agent.tools.active_screen_rect", return_value=(0.0, 0.0, 1000.0, 1000.0))
+    mocker.patch("agent.tools.click")
+    mocker.patch("agent.tools.type_text")
+
+    tools.dispatch("click", {"x": 500, "y": 250})
+    tools.dispatch("type_text", {"text": "안녕하세요"})
+
+    err = capsys.readouterr().err
+    assert "[ComputerUse] Clicked at 500,250" in err
+    assert "[ComputerUse] Typed: '안녕하세요'" in err
+
+
 def test_loop_without_done_speaks_fallback(mocker):
     """A command the model never marks done must not end in silence."""
     mock_llm = MagicMock()
@@ -500,6 +570,37 @@ def test_click_maps_onto_external_display_with_negative_origin(mocker):
     tools.dispatch("click", {"x": 500, "y": 500})
     x, y = mock_click.call_args.args
     assert x == -960 and y == 540          # center of the external display
+
+
+def test_click_maps_against_last_screenshot_rect_not_a_fresh_lookup(mocker):
+    """Mac-specific multi-monitor bug: re-resolving "the active display" at
+    click time can disagree with what was resolved for the screenshot the
+    model actually saw (frontmost app/focus can shift between the two, or
+    the region capture can silently fall back to the main display — see
+    actions/screen.py's last_capture_rect). The click must land where the
+    screenshot said it would, not wherever active_screen_rect() thinks is
+    active right now."""
+    from agent import tools
+    mocker.patch("agent.tools.active_screen_rect",
+                 return_value=(0.0, 0.0, 2560.0, 1440.0))          # "now" — wrong
+    mocker.patch("agent.tools.last_capture_rect",
+                 return_value=(-1920.0, 0.0, 1920.0, 1080.0))      # what was shown
+    mock_click = mocker.patch("agent.tools.click")
+    tools.dispatch("click", {"x": 500, "y": 500})
+    x, y = mock_click.call_args.args
+    assert x == -960 and y == 540
+
+
+def test_click_falls_back_to_active_screen_rect_without_prior_screenshot(mocker):
+    """No screenshot has been taken yet (last_capture_rect() is None) — must
+    still work by falling back to a fresh active_screen_rect() lookup."""
+    from agent import tools
+    mocker.patch("agent.tools.active_screen_rect",
+                 return_value=(0.0, 0.0, 1000.0, 1000.0))
+    mocker.patch("agent.tools.last_capture_rect", return_value=None)
+    mock_click = mocker.patch("agent.tools.click")
+    tools.dispatch("click", {"x": 500, "y": 500})
+    mock_click.assert_called_once_with(500, 500)
 
 
 # ---------------------------------------------------------------------------
@@ -703,6 +804,28 @@ def test_orphan_closing_think_tag_stripped(mocker):
     assert result == "사파리를 열었습니다"
 
 
+def test_percent_encoded_response_decoded_before_speaking(mocker):
+    """Some models copy a URL's percent-encoded query straight into the
+    spoken "response" field instead of natural language — TTS would read it
+    out character by character (e.g. "퍼센트 이디..."), so it must be decoded
+    back to readable text before it reaches speak()."""
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.return_value = (
+        '{"action": "open_url", "params": {"url": "https://www.google.com/search?q=클로드"}, '
+        '"done": true, "response": "%ED%81%B4%EB%A1%9C%EB%93%9C 검색 결과를 열었어요"}'
+    )
+    agent = _make_agent(mock_llm)
+    mocker.patch("agent.core.tools.dispatch", return_value="ok")
+    mock_speak = mocker.patch("agent.core.speak")
+
+    result = agent.run("클로드 검색해줘")
+
+    assert result == "클로드 검색 결과를 열었어요"
+    mock_speak.assert_called_once_with("클로드 검색 결과를 열었어요", "Yuna", 200,
+                                       tts_config=agent._tts)
+
+
 def test_invalid_json_retried_then_recovers(mocker):
     """A malformed first reply (no JSON at all) must trigger a corrective
     re-prompt rather than being spoken verbatim; a valid reply on retry
@@ -727,7 +850,8 @@ def test_invalid_json_retried_then_recovers(mocker):
         isinstance(m.get("content"), str) and "유효한 JSON이 아니었어요" in m["content"]
         for m in second_call_messages
     )
-    mock_speak.assert_called_once_with("사파리를 열었습니다", "Yuna", 200, tts_config=agent._tts)
+    mock_speak.assert_called_once_with("사파리를 열었습니다", "Yuna", 200,
+                                       tts_config=agent._tts)
 
 
 def test_persistently_invalid_json_falls_back_honestly(mocker):
@@ -770,3 +894,198 @@ def test_cached_result_state_reported_before_speak(mocker):
 
     assert "state:success" in call_order
     assert call_order.index("state:success") < call_order.index("speak")
+
+
+def test_agent_memory_hooks_record_action_and_conversation(mocker):
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.return_value = (
+        '{"action": "launch_app", "params": {"app": "Safari"}, "done": true, "response": "열었어요"}'
+    )
+    mock_memory = MagicMock()
+    agent = _make_agent(mock_llm)
+    agent._memory = mock_memory
+    mocker.patch("agent.core.tools.dispatch", return_value="ok")
+    mocker.patch("agent.core.speak")
+
+    agent.run("사파리 열어줘")
+
+    action_args = mock_memory.log_action.call_args.args
+    assert action_args[0] == "사파리 열어줘"
+    assert action_args[1] == "launch_app"
+    assert action_args[2] == "Safari"
+    assert action_args[3] is True
+    cmd_args = mock_memory.log_command.call_args.args
+    assert cmd_args[0] == "사파리 열어줘"
+    assert cmd_args[1] is True
+    conv_args = mock_memory.log_conversation.call_args.args
+    assert conv_args == ("사파리 열어줘", "열었어요")
+
+
+def test_agent_memory_logs_click_and_type_text_targets(mocker):
+    """click/type_text carry no app/url/key/name, so the behavior log's
+    target must fall back to coordinates / typed text instead of being
+    blank — otherwise computer-use actions are invisible in the log."""
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.side_effect = [
+        '{"action": "click", "params": {"x": 500, "y": 250}, "done": false, "response": "클릭 중"}',
+        '{"action": "type_text", "params": {"text": "안녕"}, "done": true, "response": "입력했어요"}',
+    ]
+    mock_memory = MagicMock()
+    agent = _make_agent(mock_llm)
+    agent._memory = mock_memory
+    mocker.patch("agent.core.tools.dispatch", return_value="ok")
+    mocker.patch("agent.core.take_screenshot_with_grid", return_value=b"png")
+    mocker.patch("agent.core.run_applescript", return_value="")
+    mocker.patch("agent.core.speak")
+
+    agent.run("클릭하고 입력해줘")
+
+    targets = [c.args[2] for c in mock_memory.log_action.call_args_list]
+    assert targets == ["500,250", "안녕"]
+
+
+def test_agent_memory_failure_never_breaks_command(mocker):
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.return_value = (
+        '{"action": "launch_app", "params": {"app": "Safari"}, "done": true, "response": "열었어요"}'
+    )
+    mock_memory = MagicMock()
+    mock_memory.log_action.side_effect = Exception("disk full")
+    mock_memory.log_command.side_effect = Exception("disk full")
+    mock_memory.log_conversation.side_effect = Exception("disk full")
+    agent = _make_agent(mock_llm)
+    agent._memory = mock_memory
+    mock_retriever = MagicMock()
+    mock_retriever.build_memory_block.side_effect = Exception("db locked")
+    agent._retriever = mock_retriever
+    mocker.patch("agent.core.tools.dispatch", return_value="ok")
+    mocker.patch("agent.core.speak")
+
+    result = agent.run("사파리 열어줘")
+
+    assert result == "열었어요"
+    # metrics collection must still happen
+    assert agent._collector.record.call_args.args[2] is True
+
+
+def test_agent_retriever_block_reaches_system_prompt(mocker):
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.return_value = (
+        '{"action": "speak_only", "params": {}, "done": true, "response": "네"}'
+    )
+    mock_retriever = MagicMock()
+    mock_retriever.build_memory_block.return_value = "- name: 하민"
+    agent = _make_agent(mock_llm)
+    agent._retriever = mock_retriever
+    mocker.patch("agent.core.tools.dispatch", return_value="")
+    mocker.patch("agent.core.speak")
+
+    agent.run("내 이름 뭐야")
+
+    messages = mock_llm.complete.call_args.args[0]
+    system = messages[0]
+    assert system["role"] == "system"
+    assert "- name: 하민" in system["content"]
+    mock_retriever.build_memory_block.assert_called_once_with("내 이름 뭐야")
+
+
+# ---------------------------------------------------------------------------
+# Routine-save offer (repeated command → voice yes/no → RoutineManager.save)
+# ---------------------------------------------------------------------------
+
+
+def _make_routine_agent(mock_llm, listen="네"):
+    mock_guard = MagicMock()
+    mock_guard.check.return_value = True
+    mock_guard.is_dangerous.return_value = False
+    mock_detector = MagicMock()
+    mock_detector.record.return_value = True  # threshold reached this run
+    mock_tts_cfg = MagicMock(voice="Yuna", rate=200)
+    routines = MagicMock()
+    agent = Agent(mock_llm, mock_guard, MagicMock(), mock_detector, mock_tts_cfg,
+                  routines=routines,
+                  listen_confirm=MagicMock(return_value=listen))
+    return agent, routines
+
+
+def _launch_app_llm():
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.return_value = (
+        '{"action": "launch_app", "params": {"app": "Safari"}, '
+        '"done": true, "response": "열었어요"}'
+    )
+    return mock_llm
+
+
+def test_repeated_command_accepted_saves_routine(mocker):
+    agent, routines = _make_routine_agent(_launch_app_llm(), listen="네")
+    mock_speak = mocker.patch("agent.core.speak")
+    mocker.patch("agent.core.run_applescript", return_value="")
+    mocker.patch("agent.core.tools.dispatch", return_value="ok")
+
+    agent.run("사파리 열어줘")
+
+    routines.save.assert_called_once_with(
+        "사파리 열어줘",
+        [{"action": "launch_app", "params": {"app": "Safari"}}],
+    )
+    spoken = [c.args[0] for c in mock_speak.call_args_list]
+    assert "이 명령을 루틴으로 저장할까요?" in spoken
+    assert "루틴으로 저장했어요." in spoken
+
+
+def test_repeated_command_declined_not_saved(mocker):
+    agent, routines = _make_routine_agent(_launch_app_llm(), listen="아니")
+    mocker.patch("agent.core.speak")
+    mocker.patch("agent.core.run_applescript", return_value="")
+    mocker.patch("agent.core.tools.dispatch", return_value="ok")
+
+    agent.run("사파리 열어줘")
+
+    routines.save.assert_not_called()
+
+
+def test_failed_command_never_offers_routine(mocker):
+    agent, routines = _make_routine_agent(_launch_app_llm(), listen="네")
+    mock_speak = mocker.patch("agent.core.speak")
+    mocker.patch("agent.core.run_applescript", return_value="")
+    mocker.patch("agent.core.tools.dispatch", return_value="error: app not found")
+
+    agent.run("사파리 열어줘")
+
+    routines.save.assert_not_called()
+    spoken = [c.args[0] for c in mock_speak.call_args_list]
+    assert "이 명령을 루틴으로 저장할까요?" not in spoken
+
+
+def test_dangerous_run_never_offers_routine(mocker):
+    """run_routine replays saved steps straight through tools.dispatch — no
+    SafetyGuard confirmation — so a run with a dangerous step must not become
+    a routine."""
+    agent, routines = _make_routine_agent(_launch_app_llm(), listen="네")
+    agent._guard.is_dangerous.return_value = True
+    mocker.patch("agent.core.speak")
+    mocker.patch("agent.core.run_applescript", return_value="")
+    mocker.patch("agent.core.tools.dispatch", return_value="ok")
+
+    agent.run("휴지통 비워줘")
+
+    routines.save.assert_not_called()
+
+
+def test_routine_offer_listen_failure_never_breaks_command(mocker):
+    agent, routines = _make_routine_agent(_launch_app_llm())
+    agent._listen_confirm = MagicMock(side_effect=RuntimeError("mic busy"))
+    mocker.patch("agent.core.speak")
+    mocker.patch("agent.core.run_applescript", return_value="")
+    mocker.patch("agent.core.tools.dispatch", return_value="ok")
+
+    result = agent.run("사파리 열어줘")
+
+    assert result == "열었어요"
+    routines.save.assert_not_called()

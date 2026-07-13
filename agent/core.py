@@ -1,6 +1,7 @@
 import json
 import re
 import time
+from urllib.parse import unquote
 from llm.base import LLMBase
 from safety.guard import SafetyGuard
 from metrics.collector import MetricsCollector
@@ -12,9 +13,16 @@ from agent import tools
 from actions.tts import speak
 from actions.applescript import run_applescript
 from actions.screen import take_screenshot_with_grid
+from stt.confirm import listen_for_confirmation, parse_yes_no
 
 # Computer-use tasks need room to screenshot → click → verify → correct.
 MAX_ITERATIONS = 8
+
+# These require seeing the screen to pick a meaningful (x, y) — without a
+# screenshot the model is just guessing coordinates. scroll is exempt: x/y
+# are optional there (defaults to the current pointer position), so it works
+# fine blind (e.g. "scroll down").
+_VISION_ONLY_ACTIONS = {"click", "double_click", "move_mouse"}
 
 # Reasoning models (e.g. DeepSeek-style) prepend a chain-of-thought block
 # before the actual answer. Cap how many times we ask one to reformat as
@@ -41,6 +49,20 @@ def _strip_think(raw: str) -> str:
     return cleaned
 
 
+_PERCENT_ENCODED_RUN_RE = re.compile(r'(?:%[0-9A-Fa-f]{2}){3,}')
+
+
+def _decode_stray_percent_encoding(text: str) -> str:
+    """Some models copy a URL's percent-encoded query straight into the
+    spoken "response" instead of writing natural language, which TTS then
+    reads out character by character (e.g. "퍼센트 이디..."). Runs of 3+
+    %XX groups are decoded back to the original text; a stray "%" in normal
+    prose (e.g. "50% 할인") never matches this pattern."""
+    return _PERCENT_ENCODED_RUN_RE.sub(
+        lambda m: unquote(m.group(0)), text
+    )
+
+
 class Agent:
     def __init__(
         self,
@@ -50,6 +72,10 @@ class Agent:
         detector: RoutineDetector,
         tts_config,
         on_state=None,
+        memory=None,
+        retriever=None,
+        routines=None,
+        listen_confirm=None,
     ):
         self._llm = llm
         self._guard = guard
@@ -57,6 +83,10 @@ class Agent:
         self._detector = detector
         self._tts = tts_config
         self._on_state = on_state
+        self._memory = memory
+        self._retriever = retriever
+        self._routines = routines
+        self._listen_confirm = listen_confirm or listen_for_confirmation
         self._cache = HotCommandCache()
         self._context = ConversationContext()
 
@@ -69,6 +99,44 @@ class Agent:
 
     def set_llm(self, llm: LLMBase) -> None:
         self._llm = llm
+
+    def set_retriever(self, retriever) -> None:
+        self._retriever = retriever
+
+    def _log_action(self, command: str, action: str, params: dict,
+                    dispatch_res: str) -> None:
+        """Tier-2 behavior log; must never break the command loop."""
+        if self._memory is None:
+            return
+        try:
+            if action in ("click", "double_click", "move_mouse"):
+                target = f"{params.get('x')},{params.get('y')}"
+            elif action == "type_text":
+                target = str(params.get("text") or "")
+            else:
+                target = str(params.get("app") or params.get("url")
+                             or params.get("key") or params.get("name") or "")
+            self._memory.log_action(
+                command, action, target,
+                not (isinstance(dispatch_res, str) and dispatch_res.startswith("error")),
+                json.dumps(params, ensure_ascii=False)[:500],
+            )
+        except Exception as e:
+            import sys
+            print(f"[Memory] log_action failed: {e}", file=sys.stderr)
+
+    def _log_outcome(self, command: str, success: bool, elapsed_ms: int,
+                     final_response: str | None = None) -> None:
+        """Tier-2 command/conversation log; must never break the command loop."""
+        if self._memory is None:
+            return
+        try:
+            self._memory.log_command(command, success, elapsed_ms)
+            if final_response is not None:
+                self._memory.log_conversation(command, final_response)
+        except Exception as e:
+            import sys
+            print(f"[Memory] log_outcome failed: {e}", file=sys.stderr)
 
     def _observe(self, action: str, dispatch_res: str) -> dict:
         """Build the post-action observation message fed back into the loop."""
@@ -154,6 +222,8 @@ class Agent:
                 result = tools.dispatch(action_str, params_dict)
             elapsed_ms = int((time.monotonic() - start) * 1000)
             failed = isinstance(result, str) and result.startswith("error")
+            self._log_action(command, action_str, params_dict, result)
+            self._log_outcome(command, not failed, elapsed_ms)
             self._set_state("error" if failed else "success")
             if failed:
                 speak("저장된 명령 실행에 실패했어요.", self._tts.voice, self._tts.rate, tts_config=self._tts)
@@ -168,9 +238,20 @@ class Agent:
         params: dict = {}
         last_dispatch = ""
         json_retries = 0
+        # This run's successful real actions, in order — the replayable steps
+        # a saved routine would consist of.
+        executed_steps: list[dict] = []
+        had_dangerous = False
         # Maintain one running message list so each step remembers the original
         # command and the assistant's prior actions/observations.
-        messages = self._context.to_messages(command)
+        memory_block = None
+        if self._retriever:
+            try:
+                memory_block = self._retriever.build_memory_block(command)
+            except Exception as e:
+                import sys
+                print(f"[Memory] retrieval failed: {e}", file=sys.stderr)
+        messages = self._context.to_messages(command, memory_block=memory_block)
         for i in range(MAX_ITERATIONS):
             try:
                 raw = self._llm.complete(messages)
@@ -226,13 +307,14 @@ class Agent:
             action = parsed.get("action", "speak_only")
             params = parsed.get("params", {})
             done = parsed.get("done", False)
-            response_text = parsed.get("response", "")
+            response_text = _decode_stray_percent_encoding(parsed.get("response", ""))
             print(f"[Agent] Parsed: Action='{action}', Params={params}, Done={done}, Response='{response_text}'", file=sys.stderr)
 
             dangerous = self._guard.is_dangerous(action, params)
             if dangerous:
                 print(f"[Agent] Action flagged as DANGEROUS: {action}", file=sys.stderr)
                 self._set_state("danger_confirm")
+                had_dangerous = True
                 retry += 1
 
             if not self._guard.check(action, params):
@@ -244,10 +326,29 @@ class Agent:
             if dangerous:
                 self._set_state("executing")
 
-            print(f"[Agent] Dispatching action '{action}' with {params}...", file=sys.stderr)
-            dispatch_res = tools.dispatch(action, params)
+            if action in _VISION_ONLY_ACTIONS and not getattr(self._llm, "supports_vision", False):
+                # Without a screenshot this model has no way to know what's
+                # on screen — the "0..1000 grid" coordinates it just supplied
+                # are pure guesses (observed with Ollama/llama3: it "clicked
+                # the left edge" and "moved to the top edge" of nothing in
+                # particular, then claimed done). Reject before ever moving
+                # the real mouse, and let the model try a non-visual approach.
+                dispatch_res = (
+                    f"error: {action} requires a vision-capable LLM provider "
+                    "(screenshots aren't available with this one) — use "
+                    "keyboard shortcuts, AppleScript, launch_app/open_url "
+                    "instead, or tell the user honestly that this needs a "
+                    "vision-capable provider (Claude/OpenAI)."
+                )
+                print(f"[Agent] Blocked '{action}': current LLM has no vision support", file=sys.stderr)
+            else:
+                print(f"[Agent] Dispatching action '{action}' with {params}...", file=sys.stderr)
+                dispatch_res = tools.dispatch(action, params)
             last_dispatch = dispatch_res
             print(f"[Agent] Dispatch result: '{dispatch_res}'", file=sys.stderr)
+            self._log_action(command, action, params, dispatch_res)
+            if action != "speak_only" and not dispatch_res.startswith("error"):
+                executed_steps.append({"action": action, "params": params})
 
             if done:
                 if dispatch_res.startswith("error"):
@@ -287,6 +388,7 @@ class Agent:
 
         is_repeated = self._detector.record(command)
         self._context.add_turn(command, final_response)
+        self._log_outcome(command, success, elapsed_ms, final_response)
         self._collector.record(command, 0.95, success, retry,
                                self._guard.is_dangerous(action, params),
                                elapsed_ms, is_repeated)
@@ -301,7 +403,29 @@ class Agent:
 
         if final_response:
             speak(final_response, self._tts.voice, self._tts.rate, tts_config=self._tts)
-        if is_repeated:
-            speak("이 명령을 루틴으로 저장할까요?", self._tts.voice, self._tts.rate, tts_config=self._tts)
+        # Only offer what can actually be replayed: the run must have
+        # succeeded with at least one real step, and none of them dangerous —
+        # run_routine replays steps straight through tools.dispatch, without
+        # the SafetyGuard confirmation this run went through.
+        if (is_repeated and success and executed_steps and not had_dangerous
+                and self._routines is not None):
+            self._offer_routine_save(command, executed_steps)
 
         return final_response
+
+    def _offer_routine_save(self, command: str, steps: list[dict]) -> None:
+        """Voice yes/no → persist this run's steps as a replayable routine
+        (listed in the HUD pinned panel, runnable via run_routine). Failures
+        here must never break the command that just succeeded; silence or an
+        unclear answer simply skips saving."""
+        import sys
+        try:
+            speak("이 명령을 루틴으로 저장할까요?", self._tts.voice, self._tts.rate, tts_config=self._tts)
+            answer = parse_yes_no(self._listen_confirm())
+            if answer is True:
+                self._routines.save(command, steps)
+                speak("루틴으로 저장했어요.", self._tts.voice, self._tts.rate, tts_config=self._tts)
+            elif answer is False:
+                speak("알겠어요.", self._tts.voice, self._tts.rate, tts_config=self._tts)
+        except Exception as e:
+            print(f"[Agent] routine-save offer failed: {e}", file=sys.stderr)

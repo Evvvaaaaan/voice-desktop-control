@@ -24,6 +24,9 @@ from ui.animations import STATE_COLORS, STATE_LABELS
 # VoiceDesk's lighter content (see spec §3).
 _SIZES = {
     "idle_collapsed": (190, 10),
+    # A short one-line strip: the hover peek only shows the provider summary, so
+    # it stays close to the collapsed pill's own height rather than swelling into
+    # a tall box.
     "idle_peek": (380, 42),
     "idle_pinned": (480, 140),
     "listening": (360, 62),
@@ -113,11 +116,9 @@ _COLLAPSED_LIP = 8
 def _visual_size(visual, top_inset=0.0, notch_size=None, sizes=_SIZES):
     """(width, total_height, content_height) for a visual on this screen.
 
-    On a screen with a physical notch (`top_inset` > 0) the window's top
-    `top_inset` points sit behind the notch/menu-bar row, so every expanded
-    visual grows taller by that amount while its content keeps the spec'd
-    height, laid out in the visible bottom region. The collapsed idle pill
-    wraps the notch itself plus a small visible lip below the menu bar.
+    Expanded visuals use their requested height directly; the black HUD surface
+    itself handles the top edge. The collapsed idle pill wraps the notch itself
+    plus a small visible lip below the menu bar.
     """
     w, h = sizes.get(visual, sizes["processing"])
     if visual == "idle_collapsed":
@@ -125,7 +126,7 @@ def _visual_size(visual, top_inset=0.0, notch_size=None, sizes=_SIZES):
             ch = notch_size[1] + _COLLAPSED_LIP
             return (notch_size[0] + _COLLAPSED_EXTRA_W, ch, ch)
         return (w, h, h)
-    return (w, h + top_inset, h)
+    return (w, h, h)
 
 
 def _truncate(s: str, n: int = 44) -> str:
@@ -530,6 +531,7 @@ class NotchHUD:
         self._hover_timer = None
         self._tick_timer = None
         self._initialized = False
+        self._last_render_json = None
 
     # ---- derived visual -------------------------------------------------
     def _visual(self) -> str:
@@ -547,14 +549,37 @@ class NotchHUD:
         self._schedule_hover_expand()
 
     def _hover_expand_fire(self):
-        if self._hover_inside and self._state == "idle":
+        if self._hover_inside and self._state == "idle" and not self._hovering:
             self._hovering = True
             self._render()
 
     def _hover_exit(self):
-        self._hover_inside = False
-        self._hovering = False
-        self._render()
+        self._apply_hover(inside=False, hovering=False)
+
+    def _hover_confirm(self):
+        """Reconciled hover-present after a frame animation settled.
+
+        The cursor has demonstrably stayed over the pill for the whole
+        animation, so the accidental-trigger dwell a fresh hoverEnter would
+        apply is redundant here — expand immediately. This is what keeps a
+        re-hover right after a collapse from feeling laggy: without it the
+        recovered enter would wait out another _HOVER_DWELL_SEC before the
+        pill grows back."""
+        if self._state == "idle":
+            self._apply_hover(inside=True, hovering=True)
+
+    def _apply_hover(self, *, inside: bool, hovering: bool):
+        """Set the hover flags and re-render only when the resulting visual
+        actually changes. Idle hover reconciles that land on the same visual
+        (e.g. any hover state while pinned still maps to idle_pinned) must not
+        churn the Python↔Swift bridge."""
+        if self._hover_inside == inside and self._hovering == hovering:
+            return
+        before = self._visual()
+        self._hover_inside = inside
+        self._hovering = hovering
+        if self._visual() != before:
+            self._render()
 
     def _toggle_pin(self):
         if self._state == "idle":
@@ -803,6 +828,7 @@ class NotchHUD:
 
     def hide(self) -> None:
         self._visible = False
+        self._last_render_json = None
         if not self._initialized:
             return
         try:
@@ -823,6 +849,8 @@ class NotchHUD:
             self._hover_enter()
         elif name == "hoverExit":
             self._hover_exit()
+        elif name == "hoverConfirm":
+            self._hover_confirm()
         elif name == "click":
             self._toggle_pin()
         elif name == "dangerAllow":
@@ -831,10 +859,19 @@ class NotchHUD:
             self._danger_resolve(False)
         elif name == "openSettings":
             if self._on_open_settings:
+                # Swift events are delivered on the stdout-reader thread. The
+                # callback builds the settings NSWindow, which AppKit forbids off
+                # the main thread ("NSWindow should only be instantiated on the
+                # main thread!"), so hop onto the main run loop first.
+                cb = self._on_open_settings
                 try:
-                    self._on_open_settings()
+                    from PyObjCTools import AppHelper
+                    AppHelper.callAfter(cb)
                 except Exception:
-                    pass
+                    try:
+                        cb()
+                    except Exception:
+                        pass
         elif name == "textSubmit":
             self._resolve_text(str(event.get("text", "")))
         elif name == "textCancel":
@@ -906,7 +943,12 @@ class NotchHUD:
         if not self._initialized:
             return
         try:
-            self._bridge.send(self._render_payload())
+            payload = self._render_payload()
+            encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if encoded == self._last_render_json:
+                return
+            self._last_render_json = encoded
+            self._bridge.send(payload)
         except Exception:
             pass
 

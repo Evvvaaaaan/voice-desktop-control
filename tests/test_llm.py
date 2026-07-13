@@ -68,13 +68,27 @@ def test_openai_adapter(mocker):
     assert result == "done"
 
 
+def _mock_ollama_post(mocker, capabilities=(), chat_content="완료"):
+    """OllamaAdapter now hits two different endpoints: /api/show (vision
+    capability check, at construction) and /api/chat (complete()) — route
+    the shared requests.post mock by URL like the real server would."""
+    def _dispatch(url, json=None, timeout=None):
+        if url.endswith("/api/show"):
+            return MagicMock(
+                json=lambda: {"capabilities": list(capabilities)},
+                raise_for_status=lambda: None,
+            )
+        return MagicMock(
+            status_code=200,
+            json=lambda: {"message": {"content": chat_content}},
+            raise_for_status=lambda: None,
+        )
+    return mocker.patch("llm.ollama_adapter.requests.post", side_effect=_dispatch)
+
+
 def test_ollama_adapter(mocker):
     from llm.ollama_adapter import OllamaAdapter
-    mock_post = mocker.patch("llm.ollama_adapter.requests.post")
-    mock_post.return_value = MagicMock(
-        json=lambda: {"message": {"content": "완료"}},
-        raise_for_status=lambda: None,
-    )
+    _mock_ollama_post(mocker, chat_content="완료")
     adapter = OllamaAdapter(url="http://localhost:11434", model="llama3")
     result = adapter.complete([{"role": "user", "content": "안녕"}])
     assert result == "완료"
@@ -105,8 +119,45 @@ def test_openai_supports_vision_and_builds_image_url_observation(mocker):
 
 def test_ollama_is_not_vision_capable(mocker):
     from llm.ollama_adapter import OllamaAdapter
+    _mock_ollama_post(mocker, capabilities=["completion"])
     adapter = OllamaAdapter(url="http://localhost:11434", model="llama3")
     assert adapter.supports_vision is False
+
+
+def test_ollama_vision_is_per_model(mocker):
+    """Ollama hosts multimodal local models too. Capability must come from
+    Ollama's own /api/show, not a model-name guess — name-based heuristics
+    get this wrong: e.g. gemma4:e4b/gemma4:e2b (Gemma is natively multimodal
+    at every size) report "vision" from /api/show even though this Ollama
+    version's /api/tags listing omits it for those exact tags, so even a
+    family-name match can't be trusted without checking the installed tag."""
+    from llm.ollama_adapter import OllamaAdapter
+    _mock_ollama_post(mocker, capabilities=["completion", "tools"])
+    assert OllamaAdapter(model="llama3").supports_vision is False
+    _mock_ollama_post(mocker, capabilities=["completion", "vision", "tools"])
+    assert OllamaAdapter(model="gemma4:e4b").supports_vision is True
+
+
+def test_ollama_vision_check_defaults_to_false_when_unreachable(mocker):
+    """Ollama not running yet / model not pulled must not crash adapter
+    construction — just fall back to the same non-vision default."""
+    from llm.ollama_adapter import OllamaAdapter
+    mocker.patch("llm.ollama_adapter.requests.post", side_effect=ConnectionError("down"))
+    adapter = OllamaAdapter(model="gemma4:e4b")
+    assert adapter.supports_vision is False
+
+
+def test_ollama_builds_native_image_observation(mocker):
+    """Ollama's /api/chat wants images as bare base64 in an "images" list,
+    not an OpenAI-style data URI content block."""
+    from llm.ollama_adapter import OllamaAdapter
+    import base64
+    _mock_ollama_post(mocker, capabilities=["completion", "vision"])
+    adapter = OllamaAdapter(model="gemma4:e4b")
+    obs = adapter.build_observation("상태입니다", b"\x89PNG_bytes")
+    assert obs["role"] == "user"
+    assert obs["content"] == "상태입니다"
+    assert obs["images"] == [base64.b64encode(b"\x89PNG_bytes").decode()]
 
 
 def test_nvidia_adapter_uses_nvidia_base_url(mocker):

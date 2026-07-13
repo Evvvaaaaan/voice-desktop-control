@@ -1,13 +1,36 @@
+import base64
 import requests
 import sys
 from llm.base import LLMBase
+
+
+def _detect_vision_support(url: str, model: str) -> bool:
+    """Ask Ollama's own /api/show for this model's capabilities instead of
+    guessing from the model name. Name-based heuristics get this wrong on
+    Ollama in both directions — e.g. this was tried with a substring check
+    for "gemma3"/"gemma4", but /api/show reports "vision" for every gemma4
+    tag including the small "e2b"/"e4b" variants (Gemma is natively
+    multimodal at every size), while Ollama's own /api/tags listing omits
+    "vision" for those exact same tags — so even a name-family match can't
+    be trusted without checking the specific installed tag's capabilities.
+    Falls back to False (same as any other unrecognized/text-only model) if
+    Ollama isn't reachable yet or the model hasn't been pulled."""
+    try:
+        resp = requests.post(f"{url}/api/show", json={"model": model}, timeout=5)
+        resp.raise_for_status()
+        return "vision" in (resp.json().get("capabilities") or [])
+    except Exception as e:
+        print(f"[Ollama] Vision capability check failed for '{model}': {e}", file=sys.stderr)
+        return False
 
 
 class OllamaAdapter(LLMBase):
     def __init__(self, url: str = "http://localhost:11434", model: str = "llama3"):
         self._url = url.rstrip("/")
         self._model = model
-        print(f"[Ollama] Initialized with URL={self._url}, Model={self._model}", file=sys.stderr)
+        self.supports_vision = _detect_vision_support(self._url, model)
+        print(f"[Ollama] Initialized with URL={self._url}, Model={self._model}, "
+              f"Vision={self.supports_vision}", file=sys.stderr)
 
     def complete(self, messages: list[dict], tools: list[dict] | None = None) -> str:
         print(f"[Ollama] Sending POST request to {self._url}/api/chat...", file=sys.stderr)
@@ -45,3 +68,13 @@ class OllamaAdapter(LLMBase):
             print(f"[Ollama] Failed to parse JSON or status was error: {e}", file=sys.stderr)
             print(f"[Ollama] Raw Response text: {resp.text}", file=sys.stderr)
             raise
+
+    def build_observation(self, text: str, screenshot_png: bytes) -> dict:
+        # Ollama's /api/chat takes images as a list of bare base64 strings
+        # (no "data:image/...;base64," prefix, unlike the OpenAI-style adapters)
+        # in an "images" field alongside "content".
+        return {
+            "role": "user",
+            "content": text,
+            "images": [base64.b64encode(screenshot_png).decode()],
+        }

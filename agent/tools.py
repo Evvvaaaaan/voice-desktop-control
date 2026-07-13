@@ -1,15 +1,30 @@
 import re
 import os
+import sys
+from urllib.parse import urlsplit, urlunsplit, quote, parse_qsl, urlencode
 from actions.applescript import run_applescript
 from actions.mouse_keyboard import (
     click, double_click, move_mouse, type_text, press_key, scroll,
 )
-from actions.screen import take_screenshot_with_grid, active_screen_rect
+from actions.screen import take_screenshot_with_grid, active_screen_rect, last_capture_rect
 
 _SAFE_APP_NAME = re.compile(r'^[A-Za-z0-9가-힣 ._-]+$')
 # Only http(s) URLs, and no characters that could break out of the quoted
 # AppleScript string ("  '  \  <  >  and whitespace).
 _SAFE_URL = re.compile(r'^https?://[^\s"\'\\<>]+$')
+
+
+def _percent_encode_url(url: str) -> str:
+    """AppleScript's `open location` (the generic, no-app-specified path)
+    mangles raw non-ASCII bytes into mojibake — e.g. a Korean search query
+    comes out as garbage in the browser's address bar. Percent-encoding the
+    path/query/fragment to plain ASCII before it ever reaches osascript
+    sidesteps that entirely."""
+    parts = urlsplit(url)
+    path = quote(parts.path, safe="/%")
+    query = urlencode(parse_qsl(parts.query, keep_blank_values=True))
+    fragment = quote(parts.fragment, safe="%")
+    return urlunsplit((parts.scheme, parts.netloc, path, query, fragment))
 
 # The vision model reports pointer targets in a resolution-independent
 # 0..1000 grid (top-left origin) so its coordinates survive screenshot
@@ -29,9 +44,18 @@ def set_text_input_provider(provider) -> None:
 
 
 def _to_logical(params):
-    """Map normalized (0..1000) x/y to global screen points on the ACTIVE
-    display — the one the screenshot was taken of. Global coordinates may be
-    negative on multi-display setups (screens left of / above the main one).
+    """Map normalized (0..1000) x/y to global screen points on the display
+    the last screenshot actually captured. Global coordinates may be negative
+    on multi-display setups (screens left of / above the main one).
+
+    Uses last_capture_rect() rather than a fresh active_screen_rect() call:
+    on a multi-monitor Mac, re-resolving "the active display" at click time
+    can disagree with what was resolved at screenshot time (a focus change
+    mid-turn, or a region-capture failure that silently fell back to the
+    main display — see _capture_active_display_png) and send the click to a
+    different display than the one the model was actually shown. Falls back
+    to active_screen_rect() only if no screenshot has been taken yet.
+
     Clamped just inside that display so a stray corner value never trips
     pyautogui's failsafe. Returns (x, y) or None if a coordinate is missing."""
     raw_x, raw_y = params.get("x"), params.get("y")
@@ -41,7 +65,7 @@ def _to_logical(params):
         nx, ny = float(raw_x), float(raw_y)
     except (TypeError, ValueError):
         return None
-    rx, ry, rw, rh = active_screen_rect()
+    rx, ry, rw, rh = last_capture_rect() or active_screen_rect()
     x = rx + nx / _COORD_SCALE * rw
     y = ry + ny / _COORD_SCALE * rh
     x = max(rx + 1, min(rx + rw - 2, x))
@@ -64,6 +88,7 @@ def dispatch(action: str, params: dict) -> str:
         url = str(params.get("url", "") or "")
         if not _SAFE_URL.match(url):
             return f"error: invalid url: {url}"
+        url = _percent_encode_url(url)
         browser = str(params.get("browser", "") or "")
         if browser:
             if not _SAFE_APP_NAME.match(browser):
@@ -75,18 +100,21 @@ def dispatch(action: str, params: dict) -> str:
         if pt is None:
             return "error: click requires params x and y"
         click(*pt)
+        print(f"[ComputerUse] Clicked at {pt[0]},{pt[1]}", file=sys.stderr)
         return f"clicked at {pt[0]},{pt[1]}"
     elif action == "double_click":
         pt = _to_logical(params)
         if pt is None:
             return "error: double_click requires params x and y"
         double_click(*pt)
+        print(f"[ComputerUse] Double-clicked at {pt[0]},{pt[1]}", file=sys.stderr)
         return f"double_clicked at {pt[0]},{pt[1]}"
     elif action == "move_mouse":
         pt = _to_logical(params)
         if pt is None:
             return "error: move_mouse requires params x and y"
         move_mouse(*pt)
+        print(f"[ComputerUse] Moved mouse to {pt[0]},{pt[1]}", file=sys.stderr)
         return f"moved to {pt[0]},{pt[1]}"
     elif action == "type_text":
         text = params.get("text")
@@ -100,17 +128,22 @@ def dispatch(action: str, params: dict) -> str:
                 return "error: 사용자가 텍스트 입력을 취소했습니다"
             text = confirmed
         type_text(text)
+        print(f"[ComputerUse] Typed: {text!r}", file=sys.stderr)
         return "typed"
     elif action == "press_key":
         key = params.get("key")
         if not key:
             return "error: press_key requires param key"
         press_key(key)
+        print(f"[ComputerUse] Pressed key: {key}", file=sys.stderr)
         return "pressed"
     elif action == "scroll":
         # Position is optional; scroll at the current pointer if not given.
         pt = _to_logical(params) or (0, 0)
-        scroll(pt[0], pt[1], params.get("direction", "down"), params.get("amount", 3))
+        direction = params.get("direction", "down")
+        amount = params.get("amount", 3)
+        scroll(pt[0], pt[1], direction, amount)
+        print(f"[ComputerUse] Scrolled {direction} x{amount} at {pt[0]},{pt[1]}", file=sys.stderr)
         return "scrolled"
     elif action == "run_applescript":
         script = params.get("script")

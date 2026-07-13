@@ -59,6 +59,26 @@ class HUDConfig:
 
 
 @dataclass
+class MemoryConfig:
+    enabled: bool = True
+    embedding_provider: str = "auto"     # auto | openai | nvidia | ollama | off
+    openai_embedding_model: str = "text-embedding-3-small"
+    nvidia_embedding_model: str = "nvidia/nv-embedqa-e5-v5"
+    ollama_embedding_model: str = "nomic-embed-text"
+    retrieval_top_k: int = 3
+
+
+@dataclass
+class SuggestionConfig:
+    enabled: bool = True
+    check_interval_sec: int = 300
+    startup_grace_sec: int = 300       # skip first minutes after launch
+    min_pattern_days: int = 3          # distinct days in an hour to qualify
+    cooldown_min: int = 60             # global: at most 1 suggestion per hour
+    recent_run_suppress_min: int = 60  # don't suggest a just-run command
+
+
+@dataclass
 class Config:
     stt: STTConfig = field(default_factory=STTConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
@@ -66,6 +86,8 @@ class Config:
     tts: TTSConfig = field(default_factory=TTSConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     hud: HUDConfig = field(default_factory=HUDConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
+    suggestion: SuggestionConfig = field(default_factory=SuggestionConfig)
 
 
 def _from_dict(cls, data: dict) -> Any:
@@ -85,6 +107,8 @@ def load_config(path: str = "config.yaml") -> Config:
         tts=_from_dict(TTSConfig, raw.get("tts", {})),
         safety=_from_dict(SafetyConfig, raw.get("safety", {})),
         hud=_from_dict(HUDConfig, raw.get("hud", {})),
+        memory=_from_dict(MemoryConfig, raw.get("memory", {})),
+        suggestion=_from_dict(SuggestionConfig, raw.get("suggestion", {})),
     )
 
 

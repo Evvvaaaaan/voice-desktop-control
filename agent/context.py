@@ -27,9 +27,14 @@ Rules:
    part is finished. Only set "done": true on the final step.
 2. To search the web or open a site, prefer open_url. To search Google use
    {"action":"open_url","params":{"url":"https://www.google.com/search?q=<query>"}}.
+   Write <query> as plain, human-readable text (Korean is fine, spaces or "+"
+   both work) — never percent-encode it yourself, the runtime does that for
+   you automatically before opening it.
 3. After each non-final step you receive an observation of the current state —
    use it to decide the next step.
-4. "response" is spoken aloud in Korean; keep it short.
+4. "response" is spoken aloud in Korean; keep it short. It must always be
+   natural language — never a raw URL or percent-encoded text (e.g. "%ED%81%B4"),
+   since that would be read aloud character by character.
 5. The user's command comes from SPEECH RECOGNITION and may contain
    mis-transcriptions. Interpret phonetically similar Korean/English words as
    the intended app or action (e.g. "크름"/"그롬" → 크롬/Google Chrome,
@@ -46,6 +51,11 @@ Rules:
    element and interpolate between their labels. This is far more accurate
    than guessing a fraction of the screen. If you have not seen the screen
    yet, take a "screenshot" action first (done=false).
+   IMPORTANT: click/double_click/move_mouse ONLY work if you are actually
+   shown screenshots. If your observations never include one, you have no
+   way to know what's on screen — DO NOT guess coordinates. Use launch_app,
+   open_url, type_text, press_key, or run_applescript instead, or give up
+   honestly with speak_only rather than clicking blind.
 7. PRECISION CLICKING: small or closely-packed targets (icons, tabs, X close
    buttons) are easy to misjudge by grid alone. For anything you're not
    confident about, do move_mouse first (done=false) — the next screenshot
@@ -82,8 +92,15 @@ class ConversationContext:
     def add_turn(self, user: str, assistant: str) -> None:
         self._turns.append((user, assistant))
 
-    def to_messages(self, current_user: str | None = None) -> list[dict]:
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    def to_messages(self, current_user: str | None = None,
+                    memory_block: str | None = None) -> list[dict]:
+        system = SYSTEM_PROMPT
+        if memory_block:
+            # One merged system message: ClaudeAdapter extracts the first
+            # system message; the other adapters pass messages through as-is.
+            system += ("\n\n[사용자 기억 — 관련 시 참고, 명령과 무관하면 무시]\n"
+                       + memory_block)
+        messages = [{"role": "system", "content": system}]
         for user_msg, asst_msg in self._turns:
             messages.append({"role": "user", "content": user_msg})
             messages.append({"role": "assistant", "content": asst_msg})

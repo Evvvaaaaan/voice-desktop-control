@@ -15,7 +15,7 @@ llm:
   nvidia_model: minimaxai/minimax-m3
 
 activation:
-  wake_word: true
+  wake_word: false
   wake_phrase: "hey desk"
   hotkey: true
   hotkey_binding: "alt+space"
@@ -31,3 +31,19 @@ tts:
 
 safety:
   require_confirmation: true
+
+memory:
+  enabled: true
+  embedding_provider: auto # auto | openai | nvidia | ollama | off
+  openai_embedding_model: text-embedding-3-small
+  nvidia_embedding_model: nvidia/nv-embedqa-e5-v5
+  ollama_embedding_model: nomic-embed-text
+  retrieval_top_k: 3
+
+suggestion:
+  enabled: true
+  check_interval_sec: 300 # lower to 30 to try suggestions quickly
+  startup_grace_sec: 300  # lower to 10 to try suggestions quickly
+  min_pattern_days: 3     # distinct days in the same hour to count as a habit
+  cooldown_min: 60        # at most 1 suggestion per hour
+  recent_run_suppress_min: 60

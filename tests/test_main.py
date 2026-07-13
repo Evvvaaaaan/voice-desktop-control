@@ -164,11 +164,10 @@ class TestProviderInfo:
         cfg = Config()
         cfg.llm.provider = "claude"
         cfg.llm.claude_model = "claude-sonnet-4-6"
-        cfg.tts.provider = "nvidia"
-        cfg.tts.nvidia_voice = "Chatterbox-Multilingual.ko-KR.Male"
+        cfg.tts.voice = "Juna"
         assert _provider_info(cfg) == (
             "macos", "claude", "claude-sonnet-4-6",
-            "nvidia", "Chatterbox-Multilingual.ko-KR.Male",
+            "macos", "Juna",
         )
 
     def test_ollama_and_macos_defaults(self):
@@ -176,6 +175,53 @@ class TestProviderInfo:
         from config.loader import Config
         cfg = Config()
         assert _provider_info(cfg) == ("macos", "ollama", "llama3", "macos", "Yuna")
+
+
+class TestProjectConfigPath:
+    """A dev run (`python3 main.py` from the repo) must prefer the repo's own
+    config.yaml over the per-user copy in STATE_DIR — otherwise edits to it
+    silently do nothing, since STATE_DIR's copy is seeded once from Config()
+    defaults and read/written from then on instead."""
+
+    def test_prefers_repo_config_when_present_and_not_frozen(self, mocker, tmp_path):
+        import main
+        repo_cfg = tmp_path / "config.yaml"
+        repo_cfg.write_text("stt:\n  provider: macos\n")
+        mocker.patch("main.__file__", str(tmp_path / "main.py"))
+        mocker.patch.object(main.sys, "frozen", False, create=True)
+        assert main._project_config_path() == str(repo_cfg)
+
+    def test_returns_none_when_repo_config_missing(self, mocker, tmp_path):
+        import main
+        mocker.patch("main.__file__", str(tmp_path / "main.py"))
+        mocker.patch.object(main.sys, "frozen", False, create=True)
+        assert main._project_config_path() is None
+
+    def test_returns_none_when_frozen_even_if_repo_config_exists(self, mocker, tmp_path):
+        """The packaged .app bundles its own config.yaml (see setup.py's
+        DATA_FILES) — it must never be treated as the writable settings
+        file, so STATE_DIR stays in charge there."""
+        import main
+        (tmp_path / "config.yaml").write_text("stt:\n  provider: macos\n")
+        mocker.patch("main.__file__", str(tmp_path / "main.py"))
+        mocker.patch.object(main.sys, "frozen", True, create=True)
+        assert main._project_config_path() is None
+
+    def test_env_var_overrides_project_config(self, mocker, tmp_path):
+        """VOICEDESK_CONFIG stays the ultimate explicit override, ahead of
+        both the repo config.yaml and STATE_DIR."""
+        import importlib
+        import main
+        repo_cfg = tmp_path / "config.yaml"
+        repo_cfg.write_text("stt:\n  provider: macos\n")
+        explicit_cfg = tmp_path / "explicit.yaml"
+        mocker.patch.dict("os.environ", {"VOICEDESK_CONFIG": str(explicit_cfg)})
+        mocker.patch("main.__file__", str(tmp_path / "main.py"))
+        try:
+            importlib.reload(main)
+            assert main.CONFIG_PATH == str(explicit_cfg)
+        finally:
+            importlib.reload(main)
 
 
 def test_record_command_passes_mic_level_callback(mocker):
@@ -359,6 +405,7 @@ class TestOrchestratorWiring:
         mock_wakeword_cls = mocker.patch("main.WakeWordListener", return_value=MagicMock())
         mock_settings_cls = mocker.patch("main.SettingsWindow", return_value=MagicMock())
         mock_menubar_cls = mocker.patch("main.VoiceDeskMenuBar", return_value=MagicMock())
+        mock_suggester_cls = mocker.patch("main.SuggestionEngine", return_value=MagicMock())
 
         return {
             "config": fake_config,
@@ -376,6 +423,7 @@ class TestOrchestratorWiring:
             "wakeword": mock_wakeword_cls,
             "settings": mock_settings_cls,
             "menubar": mock_menubar_cls,
+            "suggester": mock_suggester_cls,
         }
 
     def test_load_config_called(self, mocker, tmp_path):
@@ -412,6 +460,42 @@ class TestOrchestratorWiring:
         hud_instance = mocks["hud"].return_value
         hud_instance.show.assert_called_once()
         hud_instance.set_state.assert_called_with("idle")
+
+    def test_suggestion_engine_started_when_memory_enabled(self, mocker, tmp_path):
+        mocks = self._patch_all(mocker, tmp_path)
+        from main import main
+        main()
+        mocks["suggester"].assert_called_once()
+        args = mocks["suggester"].call_args
+        assert args.args[1] is mocks["config"].suggestion
+        mocks["suggester"].return_value.start_background.assert_called_once()
+
+    def test_suggestion_engine_skipped_when_disabled(self, mocker, tmp_path):
+        mocks = self._patch_all(mocker, tmp_path)
+        mocks["config"].suggestion.enabled = False
+        from main import main
+        main()
+        mocks["suggester"].assert_not_called()
+
+    def test_suggestion_speak_fn_matches_tts_signature(self, mocker, tmp_path):
+        """Regression: the speak_fn wiring must stay in sync with
+        actions.tts.speak — a stale tts_config kwarg once made every delivery
+        raise TypeError before anything was spoken, and unit tests couldn't
+        see it because they inject a fake speak_fn."""
+        mocks = self._patch_all(mocker, tmp_path)
+        from main import main
+        main()
+        speak_fn = mocks["suggester"].call_args.kwargs["speak_fn"]
+        run_mock = mocker.patch("actions.tts.subprocess.run")
+        speak_fn("제안 테스트")  # must not raise
+        run_mock.assert_called()
+
+    def test_agent_wired_with_routine_manager(self, mocker, tmp_path):
+        mocks = self._patch_all(mocker, tmp_path)
+        from main import main
+        main()
+        assert (mocks["agent"].call_args.kwargs["routines"]
+                is mocks["manager"].return_value)
 
     def test_settings_window_gets_paths(self, mocker, tmp_path):
         mocks = self._patch_all(mocker, tmp_path)

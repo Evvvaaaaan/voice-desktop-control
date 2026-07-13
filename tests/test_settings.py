@@ -130,7 +130,8 @@ class TestSettingsWindowInit:
     def test_pages_list(self):
         from ui.settings.window import SettingsWindow
         assert SettingsWindow.PAGES == [
-            "General", "STT", "LLM", "TTS", "Routines", "Metrics", "Permissions", "About"
+            "General", "STT", "LLM", "TTS", "Routines", "Profile", "Metrics",
+            "Permissions", "About"
         ]
 
 
@@ -482,6 +483,18 @@ class TestWindowNewPages:
         sw.show()
         assert appkit_mock.NSButton.alloc.return_value.initWithFrame_.call_count >= len(SettingsWindow.PAGES)
 
+    def test_show_reuses_existing_window(self, appkit_mock, default_config):
+        from ui.settings.window import SettingsWindow
+        sw = SettingsWindow(default_config, "/tmp/cfg.yaml")
+        sw.show()
+        sw.show()
+        assert (
+            appkit_mock.NSWindow.alloc.return_value
+            .initWithContentRect_styleMask_backing_defer_.call_count
+            == 1
+        )
+        assert sw._window.setReleasedWhenClosed_.call_args.args == (False,)
+
     def test_tab_button_handler_selects_matching_page(self, appkit_mock, default_config):
         from ui.settings.window import SettingsWindow
         sw = SettingsWindow(default_config, "/tmp/cfg.yaml")
@@ -612,68 +625,17 @@ class TestSettingsButtonActions:
         assert default_config.llm.nvidia_model == "minimaxai/minimax-m3"
         save_fn.assert_called_once()
 
-    def test_tts_page_defaults_to_macos_provider(self, appkit_mock, default_config):
-        from ui.settings.page_tts import build_tts_page
-        default_config.tts.provider = "macos"
-        builder = build_tts_page(MagicMock(), default_config, MagicMock())
-        assert builder._info_lbl.setStringValue_.call_args_list[-1][0][0] == \
-            "로컬 실행 — 인터넷 없이 즉시 사용 가능"
-
-    def test_tts_provider_handler_shows_nvidia_section(self, appkit_mock, default_config):
-        from ui.settings.page_tts import build_tts_page
-        builder = build_tts_page(MagicMock(), default_config, MagicMock())
-        builder._info_lbl = MagicMock()
-        builder._voice_field = MagicMock()
-        builder._nvidia_key = MagicMock()
-        builder._macos_views = [builder._voice_field]
-        builder._nvidia_views = [builder._nvidia_key]
-        sender = MagicMock()
-        sender.selectedItem.return_value.title.return_value = "nvidia"
-
-        builder._provider_handler.providerChanged_(sender)
-
-        builder._nvidia_key.setHidden_.assert_called_with(False)
-        builder._voice_field.setHidden_.assert_called_with(True)
-
-    def test_tts_save_handler_persists_macos_fields(self, appkit_mock, default_config):
+    def test_tts_save_handler_persists_fields(self, appkit_mock, default_config):
         from ui.settings.page_tts import build_tts_page
         save_fn = MagicMock()
         builder = build_tts_page(MagicMock(), default_config, save_fn)
-        builder._popup = MagicMock()
-        builder._popup.selectedItem.return_value.title.return_value = "macos"
         builder._voice_field = MagicMock(); builder._voice_field.stringValue.return_value = "Juna"
         builder._rate_field = MagicMock(); builder._rate_field.stringValue.return_value = "180"
-        builder._nvidia_key = MagicMock(); builder._nvidia_key.stringValue.return_value = ""
-        builder._nvidia_function_id = MagicMock(); builder._nvidia_function_id.stringValue.return_value = ""
-        builder._nvidia_voice = MagicMock(); builder._nvidia_voice.stringValue.return_value = ""
 
         builder._save_handler.save_(None)
 
-        assert default_config.tts.provider == "macos"
         assert default_config.tts.voice == "Juna"
         assert default_config.tts.rate == 180
-        save_fn.assert_called_once()
-
-    def test_tts_save_handler_persists_nvidia_fields(self, appkit_mock, default_config):
-        from ui.settings.page_tts import build_tts_page
-        save_fn = MagicMock()
-        builder = build_tts_page(MagicMock(), default_config, save_fn)
-        builder._popup = MagicMock()
-        builder._popup.selectedItem.return_value.title.return_value = "nvidia"
-        builder._voice_field = MagicMock(); builder._voice_field.stringValue.return_value = "Yuna"
-        builder._rate_field = MagicMock(); builder._rate_field.stringValue.return_value = "200"
-        builder._nvidia_key = MagicMock(); builder._nvidia_key.stringValue.return_value = "nvapi-test"
-        builder._nvidia_function_id = MagicMock()
-        builder._nvidia_function_id.stringValue.return_value = "abc-123-func-id"
-        builder._nvidia_voice = MagicMock()
-        builder._nvidia_voice.stringValue.return_value = "Chatterbox-Multilingual.ko-KR.Male"
-
-        builder._save_handler.save_(None)
-
-        assert default_config.tts.provider == "nvidia"
-        assert default_config.tts.nvidia_api_key == "nvapi-test"
-        assert default_config.tts.nvidia_function_id == "abc-123-func-id"
-        assert default_config.tts.nvidia_voice == "Chatterbox-Multilingual.ko-KR.Male"
         save_fn.assert_called_once()
 
     def test_permissions_button_handlers_open_expected_preferences(self, appkit_mock):

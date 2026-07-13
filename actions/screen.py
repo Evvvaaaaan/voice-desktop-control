@@ -4,6 +4,23 @@ import os
 import io
 
 
+def _main_display_rect():
+    """Global rect (x, y, w, h) of the main display — what a bare
+    `screencapture` (no -R region) actually captures."""
+    try:
+        import Quartz
+        m = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID())
+        return (float(m.origin.x), float(m.origin.y),
+                float(m.size.width), float(m.size.height))
+    except Exception:
+        try:
+            import pyautogui
+            w, h = pyautogui.size()
+            return (0.0, 0.0, float(w), float(h))
+        except Exception:
+            return (0.0, 0.0, 1440.0, 900.0)
+
+
 def active_screen_rect():
     """Global rect (x, y, w, h; top-left origin) of the display hosting the
     frontmost app's window, falling back to the main display.
@@ -40,16 +57,26 @@ def active_screen_rect():
                     return (float(b.origin.x), float(b.origin.y),
                             float(b.size.width), float(b.size.height))
 
-        m = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID())
-        return (float(m.origin.x), float(m.origin.y),
-                float(m.size.width), float(m.size.height))
+        return _main_display_rect()
     except Exception:
-        try:
-            import pyautogui
-            w, h = pyautogui.size()
-            return (0.0, 0.0, float(w), float(h))
-        except Exception:
-            return (0.0, 0.0, 1440.0, 900.0)
+        return _main_display_rect()
+
+
+# The rect (x, y, w, h) the most recently captured screenshot actually
+# covers. Normally equal to active_screen_rect() at capture time, but when
+# the region capture fails (see _capture_active_display_png) the fallback
+# plain `screencapture` grabs the MAIN display instead of whatever
+# active_screen_rect() had resolved (e.g. an external monitor) — so this can
+# legitimately differ from a fresh active_screen_rect() call. Click/move
+# dispatch reads this (agent/tools.py's _to_logical) instead of recomputing
+# active_screen_rect() itself, so a click is always mapped against the exact
+# display the model was actually shown, never a different one resolved a
+# moment later (e.g. after a focus change moved the "active" display).
+_last_capture_rect = None
+
+
+def last_capture_rect():
+    return _last_capture_rect
 
 
 # Target long edge after downscale. High enough that small buttons/text stay
@@ -60,13 +87,23 @@ _MAX_EDGE = 1568
 
 
 def _capture_active_display_png(tmp_path: str, with_cursor: bool = False) -> None:
+    global _last_capture_rect
     rx, ry, rw, rh = active_screen_rect()
     region = f"{rx},{ry},{rw},{rh}"
     flags = ["-x", "-C"] if with_cursor else ["-x"]
     res = subprocess.run(["screencapture", *flags, "-R", region, tmp_path],
                          capture_output=True)
     if res.returncode != 0 or os.path.getsize(tmp_path) == 0:
+        # The requested region capture failed (observed with negative-origin
+        # regions, e.g. an external monitor placed left of the main display)
+        # — screencapture then falls back to its default, the MAIN display,
+        # not the display active_screen_rect() resolved. _last_capture_rect
+        # must reflect that or later clicks get mapped against the wrong
+        # (unshown) display's coordinate space.
         subprocess.run(["screencapture", *flags, tmp_path], check=True)
+        _last_capture_rect = _main_display_rect()
+    else:
+        _last_capture_rect = (rx, ry, rw, rh)
 
 
 def take_screenshot() -> bytes:
