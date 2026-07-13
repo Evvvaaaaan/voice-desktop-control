@@ -10,6 +10,22 @@ MAX_HIT_CHARS = 200
 
 _SOURCE_TAGS = {"daily_summary": "요약", "conversation": "이전 대화"}
 
+# Vector search over past commands/conversations only fires when the
+# command itself signals it needs past context — otherwise nearly every
+# command pulls in an unrelated past command (short Korean commands cluster
+# closely in embedding space) and the LLM can act on that instead of the
+# actual request. Profile/pattern tiers stay unconditional: they're compact
+# facts, not full past-command text, so they don't carry the same risk.
+_MEMORY_CUES = (
+    "기억", "저번", "예전", "아까", "지난번", "어제", "그저께", "지난주",
+    "전에 말", "전에 했", "전에 얘기", "전에 물어",
+    "내 이름", "내가 좋아하는", "내가 자주", "나에 대해", "내 정보", "내 취향",
+)
+
+
+def _needs_memory(query: str) -> bool:
+    return any(cue in query for cue in _MEMORY_CUES)
+
 
 class MemoryRetriever:
     """Builds the per-command memory block from tiers 1 (profile),
@@ -49,7 +65,7 @@ class MemoryRetriever:
         return "\n\n".join(sections)[:MAX_BLOCK_CHARS]
 
     def _search(self, query: str) -> list[str]:
-        if self._embedder is None:
+        if self._embedder is None or not _needs_memory(query):
             return []
         vectors = self._embedder.embed([query], kind="query")
         if not vectors:

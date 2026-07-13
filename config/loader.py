@@ -31,6 +31,8 @@ class ActivationConfig:
     hotkey: bool = True
     hotkey_binding: str = "alt+space"
     continuous: bool = True   # auto re-listen after a successful command
+    wake_vad_speech_amp: int = 500     # int16 mic amplitude that counts as speech
+    wake_vad_silence_frames: int = 5   # consecutive silent frames (~80ms each) that end an utterance
 
 
 @dataclass

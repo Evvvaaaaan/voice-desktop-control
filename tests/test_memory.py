@@ -333,6 +333,24 @@ def test_retriever_includes_vector_hits(store):
     assert f"[요약] {text}" in block
 
 
+def test_retriever_skips_vector_search_without_memory_cue(store):
+    # A command with no reference to past context must not pull in an
+    # unrelated past command/summary, even if the embedder finds a match.
+    emb = FakeEmbedder()
+    text = "크롬으로 논문을 검색했다"
+    store.add_vector("daily_summary", 1, text, emb.embed([text])[0], "fake")
+    block = MemoryRetriever(store, emb).build_memory_block("크롬 열어줘")
+    assert block is None
+
+
+def test_retriever_vector_search_fires_on_memory_cue(store):
+    emb = FakeEmbedder()
+    text = "크롬으로 논문을 검색했다"
+    store.add_vector("daily_summary", 1, text, emb.embed([text])[0], "fake")
+    block = MemoryRetriever(store, emb).build_memory_block("저번에 크롬으로 뭐 검색했지?")
+    assert f"[요약] {text}" in block
+
+
 def test_retriever_empty_store_returns_none(store):
     assert MemoryRetriever(store, None).build_memory_block("명령") is None
 

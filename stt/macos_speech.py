@@ -20,6 +20,18 @@ except ImportError:
     NSBundle = None
 
 
+# English app/site names spoken mid-Korean-sentence (e.g. "chatgpt 들어가서
+# ...") are the words the ko-KR on-device model most often mangles or drops,
+# since it's tuned for Korean phonetics. SFSpeechRecognitionRequest's
+# contextualStrings biases the recognizer toward these specific words without
+# switching the whole request to an English locale, which would hurt the
+# surrounding Korean words in the same utterance.
+_CONTEXTUAL_STRINGS = (
+    "ChatGPT", "Chrome", "Safari", "Finder", "Terminal", "Notes",
+    "Calendar", "Mail", "Gmail", "YouTube", "Naver", "Google",
+)
+
+
 def _bundle_has_speech_usage_description() -> bool:
     """SFSpeechRecognizer aborts the process (SIGABRT) if the running
     bundle's Info.plist has no NSSpeechRecognitionUsageDescription key.
@@ -66,6 +78,10 @@ class MacOSSpeechAdapter(STTBase):
             )
             if recognizer.supportsOnDeviceRecognition():
                 request.setRequiresOnDeviceRecognition_(True)
+            try:
+                request.setContextualStrings_(list(_CONTEXTUAL_STRINGS))
+            except Exception:
+                pass
 
             result_holder = {"text": "", "error": None}
             done = threading.Event()

@@ -16,7 +16,10 @@ _SEARCH_RE = re.compile(
     re.IGNORECASE,
 )
 
-_COMPOSITE_MARKERS = (" 열고 ", " 하고 ", " 그리고 ", " 다음 ", " 후 ")
+_COMPOSITE_MARKERS = (
+    " 열고 ", " 하고 ", " 그리고 ", " 다음 ", " 후 ",
+    " 들어가서 ", " 가서 ", " 접속해서 ", " 이동해서 ",
+)
 
 _APP_ALIASES = (
     (("크롬", "구글 크롬", "chrome", "google chrome", "그롬", "크름"), "Google Chrome", "크롬"),

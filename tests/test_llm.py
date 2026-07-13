@@ -207,6 +207,23 @@ def test_get_adapter_returns_nvidia_adapter(mocker):
     mock_adapter.assert_called_once_with(api_key="nvapi-test", model="minimaxai/minimax-m3")
 
 
+def test_get_adapter_falls_back_to_ollama_when_provider_init_fails(mocker):
+    """A missing/invalid API key makes the openai SDK raise immediately on
+    client construction (both openai and nvidia adapters use it) — this must
+    never crash the whole app at startup or on config save; Ollama (no key
+    required) is the safe fallback."""
+    mocker.patch("llm.nvidia_adapter.OpenAI", side_effect=RuntimeError("Missing credentials"))
+    mock_ollama = mocker.patch("llm.ollama_adapter.OllamaAdapter")
+    config = make_config(
+        "nvidia", nvidia_api_key="", nvidia_model="deepseek-ai/deepseek-v4-pro",
+        ollama_url="http://localhost:11434", ollama_model="llama3",
+    )
+
+    get_llm_adapter(config)
+
+    mock_ollama.assert_called_once_with(url="http://localhost:11434", model="llama3")
+
+
 def test_get_adapter_passes_ollama_url_and_model(mocker):
     mock_adapter = mocker.patch("llm.ollama_adapter.OllamaAdapter")
     config = make_config(

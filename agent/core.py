@@ -299,14 +299,24 @@ class Agent:
                         raw_clean = "\n".join(lines[1:-1])
                     else:
                         raw_clean = "\n".join(lines[1:])
-            # Extract JSON brackets if LLM added explanations outside the JSON
-            json_match = re.search(r'\{.*\}', raw_clean, re.DOTALL)
-            if json_match:
-                raw_clean = json_match.group(0)
+            # Drop any explanation the LLM added BEFORE the JSON.
+            brace_idx = raw_clean.find('{')
+            if brace_idx != -1:
+                raw_clean = raw_clean[brace_idx:]
 
             print(f"[Agent] Cleaned response for JSON parsing:\n{raw_clean}\n-----------------", file=sys.stderr)
             try:
-                parsed = json.loads(raw_clean)
+                # Parse only the FIRST complete JSON object. Weaker/local
+                # models routinely pre-plan several future steps as extra
+                # JSON objects (or trailing "Observation: ..." prose) in one
+                # reply even though the system prompt asks for exactly one —
+                # a plain json.loads() on the whole text then fails with
+                # "Extra data" even though a valid single step is right
+                # there at the start. raw_decode() reads just that first
+                # object and reports where it ended, ignoring the rest; the
+                # loop naturally asks for the next step on the next
+                # iteration anyway.
+                parsed, _ = json.JSONDecoder().raw_decode(raw_clean)
             except json.JSONDecodeError as e:
                 print(f"[Agent] JSON parsing FAILED. Error: {e}", file=sys.stderr)
                 print(f"[Agent] Raw output was: {raw}", file=sys.stderr)

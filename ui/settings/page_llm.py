@@ -1,6 +1,10 @@
 # ui/settings/page_llm.py
 from config.loader import Config
-from ui.settings.actions import make_action_handler, wire_action
+from ui.settings.actions import make_action_handler, wire_action, make_link_button
+
+CLAUDE_KEY_URL = "https://console.anthropic.com/settings/keys"
+OPENAI_KEY_URL = "https://platform.openai.com/api-keys"
+NVIDIA_KEY_URL = "https://build.nvidia.com"
 
 CLAUDE_MODELS = ["claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-8"]
 OPENAI_MODELS = ["gpt-4o", "gpt-4o-mini"]
@@ -122,6 +126,9 @@ class _LLMPageBuilder:
         v = _cat(self._parent, "API 키:", y1); self._claude_views.append(v)
         self._claude_key = _secure_field(self._parent, self._config.llm.claude_api_key, y1)
         self._claude_views.append(self._claude_key)
+        v, self._claude_link_handler = make_link_button(
+            self._parent, "발급받기", CLAUDE_KEY_URL, _CTRL_X + 306, y1)
+        self._claude_views.append(v)
         v = _cat(self._parent, "모델:", y2); self._claude_views.append(v)
         self._claude_model = _popup(self._parent, CLAUDE_MODELS, self._config.llm.claude_model, y2, w=300)
         self._claude_views.append(self._claude_model)
@@ -133,6 +140,9 @@ class _LLMPageBuilder:
         v = _cat(self._parent, "API 키:", y1); self._openai_views.append(v)
         self._openai_key = _secure_field(self._parent, self._config.llm.openai_api_key, y1)
         self._openai_views.append(self._openai_key)
+        v, self._openai_link_handler = make_link_button(
+            self._parent, "발급받기", OPENAI_KEY_URL, _CTRL_X + 306, y1)
+        self._openai_views.append(v)
         v = _cat(self._parent, "모델:", y2); self._openai_views.append(v)
         self._openai_model = _popup(self._parent, OPENAI_MODELS, self._config.llm.openai_model, y2, w=200)
         self._openai_views.append(self._openai_model)
@@ -144,6 +154,9 @@ class _LLMPageBuilder:
         v = _cat(self._parent, "API 키:", y1); self._nvidia_views.append(v)
         self._nvidia_key = _secure_field(self._parent, self._config.llm.nvidia_api_key, y1)
         self._nvidia_views.append(self._nvidia_key)
+        v, self._nvidia_link_handler = make_link_button(
+            self._parent, "발급받기", NVIDIA_KEY_URL, _CTRL_X + 306, y1)
+        self._nvidia_views.append(v)
         v = _cat(self._parent, "모델:", y2); self._nvidia_views.append(v)
         self._nvidia_model = _field(self._parent, self._config.llm.nvidia_model, y2, w=280)
         self._nvidia_views.append(self._nvidia_model)

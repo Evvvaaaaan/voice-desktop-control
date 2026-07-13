@@ -1,6 +1,8 @@
 # ui/settings/page_stt.py
 from config.loader import Config
-from ui.settings.actions import make_action_handler, wire_action
+from ui.settings.actions import make_action_handler, wire_action, make_link_button
+
+WHISPER_API_KEY_URL = "https://platform.openai.com/api-keys"
 
 WHISPER_MODELS = ["tiny", "base", "small", "medium"]
 
@@ -94,6 +96,8 @@ class _STTPageBuilder:
         # ── Whisper API ────────────────────────────────────────────────────────
         self._api_cat = _cat(self._parent, "API 키:", y)
         self._api_field = _secure_field(self._parent, self._config.stt.whisper_api_key, y)
+        self._api_link, self._api_link_handler = make_link_button(
+            self._parent, "발급받기", WHISPER_API_KEY_URL, _CTRL_X + 306, y)
         y -= _ROW
 
         self._api_note = _lbl(
@@ -151,7 +155,7 @@ class _STTPageBuilder:
         show_api = provider == "whisper_api"
         show_local = provider == "whisper_local"
 
-        for v in (self._api_cat, self._api_field, self._api_note, self._sep1):
+        for v in (self._api_cat, self._api_field, self._api_link, self._api_note, self._sep1):
             v.setHidden_(not show_api)
         for v in (self._local_cat, self._model_popup, self._local_note, self._sep2):
             v.setHidden_(not show_local)
