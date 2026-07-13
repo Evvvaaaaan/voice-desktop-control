@@ -16,18 +16,18 @@ python3 main.py                    # run the app (needs macOS permissions, see S
 
 ## Architecture map
 
-| Path          | Role |
-|---------------|------|
-| `main.py`     | Orchestrator: wires components, menu bar, config hot-reload |
-| `activation/` | Wake word (openwakeword) + hotkey |
-| `stt/`        | Speech-to-text adapters (whisper local/API, macOS) |
-| `llm/`        | Provider adapters (Claude, OpenAI, NVIDIA, Ollama) — all share ONE system prompt |
+| Path          | Role                                                                                                                                                         |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `main.py`     | Orchestrator: wires components, menu bar, config hot-reload                                                                                                  |
+| `activation/` | Wake word (openwakeword) + hotkey                                                                                                                            |
+| `stt/`        | Speech-to-text adapters (whisper local/API, macOS)                                                                                                           |
+| `llm/`        | Provider adapters (Claude, OpenAI, NVIDIA, Ollama) — all share ONE system prompt                                                                             |
 | `agent/`      | The runtime harness: `context.py` (SYSTEM_PROMPT, conversation window), `core.py` (ReAct loop), `tools.py` (action dispatch), `cache.py` (hot-command cache) |
-| `actions/`    | macOS effectors: AppleScript, mouse/keyboard, screen, TTS |
-| `safety/`     | SafetyGuard — blocks/confirms dangerous actions |
-| `routines/`   | Repeated-command detection and saved routines |
-| `metrics/`    | Command success/latency collection |
-| `ui/`         | Notch HUD (Swift, auto-compiled), settings window, menu bar |
+| `actions/`    | macOS effectors: AppleScript, mouse/keyboard, screen, TTS                                                                                                    |
+| `safety/`     | SafetyGuard — blocks/confirms dangerous actions                                                                                                              |
+| `routines/`   | Repeated-command detection and saved routines                                                                                                                |
+| `metrics/`    | Command success/latency collection                                                                                                                           |
+| `ui/`         | Notch HUD (Swift, auto-compiled), settings window, menu bar                                                                                                  |
 
 ## Runtime harness rules (do not weaken)
 
@@ -56,3 +56,7 @@ The agent loop in `agent/core.py` enforces the same harness the docs describe:
 - User-facing strings (spoken responses, HUD text) are Korean; code,
   comments, and commit messages are English.
 - `scratch/` holds throwaway diagnostics — don't import from it.
+
+## Always use Korean
+
+- Use Korean when explaining, answering, and writing a commit message or PR message.

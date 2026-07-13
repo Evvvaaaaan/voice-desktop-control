@@ -101,12 +101,14 @@ CONFIG_PATH = (
 )
 DB_PATH = os.environ.get("VOICEDESK_DB", os.path.join(STATE_DIR, "command_history.db"))
 ROUTINES_PATH = os.environ.get("VOICEDESK_ROUTINES", os.path.join(STATE_DIR, "routines.json"))
+TODOS_PATH = os.environ.get("VOICEDESK_TODOS", os.path.join(STATE_DIR, "todos.json"))
 
 
 def _sync_runtime_env() -> None:
     os.environ["VOICEDESK_CONFIG"] = CONFIG_PATH
     os.environ["VOICEDESK_DB"] = DB_PATH
     os.environ["VOICEDESK_ROUTINES"] = ROUTINES_PATH
+    os.environ["VOICEDESK_TODOS"] = TODOS_PATH
 
 
 def _wav_bytes(audio, sample_rate: int) -> bytes:
@@ -352,6 +354,19 @@ def main():
         time.sleep(1.5)
         hud.set_transcript("")
         hud.set_state("idle")
+
+    def _run_from_hud(command: str) -> None:
+        # A command-palette tap in the pinned panel. Take the same command
+        # lock a voice command would, so the tap can't race an in-flight
+        # session; if one's already running, ignore the tap rather than queue.
+        if not _try_begin_session():
+            return
+        try:
+            _run_suggested(command)
+        finally:
+            _end_session()
+
+    hud.set_run_command_callback(_run_from_hud)
 
     if memory_store and config.suggestion.enabled:
         from actions.tts import speak as _suggest_speak

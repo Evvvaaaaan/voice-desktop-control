@@ -10,10 +10,12 @@ import atexit
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import tempfile
 import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -29,12 +31,19 @@ _SIZES = {
     # a tall box.
     "idle_peek": (380, 42),
     "idle_pinned": (480, 140),
-    "listening": (360, 62),
-    "processing": (360, 66),
-    "executing": (360, 66),
-    "success": (360, 66),
-    "error": (360, 66),
-    "danger_confirm": (460, 100),
+    # Active states + danger. On a physical-notch display these render as a
+    # notch-height strip (Swift overrides the height to the notch height, and
+    # +transcript row when present — see visualSize); the WIDTH here is the
+    # left/right span that flanks the notch, so it's sized to leave room for the
+    # status message (or 실행/취소 buttons) in the ear beside the notch. The height
+    # is used only on a notchless display, where the original downward layout
+    # (icon+label over the transcript) is kept.
+    "listening": (420, 62),
+    "processing": (420, 66),
+    "executing": (420, 66),
+    "success": (420, 66),
+    "error": (420, 66),
+    "danger_confirm": (500, 100),
     "text_input": (540, 120),
 }
 
@@ -137,15 +146,26 @@ def _truncate(s: str, n: int = 44) -> str:
 # playing) are enabled; without them it keeps the original compact layout.
 # Widened further (was 640) for the album-art thumbnail + prev/play/next
 # transport controls in the media card, and taller (was 210) for the
-# saved-routines row underneath the provider columns.
-_PINNED_WITH_WIDGETS = (760, 250)
+# saved-routines row underneath the provider columns. Taller again (was 250)
+# for the month-grid calendar + analog clock row (whose height is now fixed —
+# the calendar's per-day todo list scrolls inside a capped box (with a fixed
+# "add todo" row beneath it), so a busy day never grows the panel).
+#
+# The base height is sized to fit media + clock/calendar + the bottom command
+# palette snugly (so the panel isn't padded out with a big gap above the
+# palette). The saved-routines row is optional, so its height is added only
+# when there are routines to show — see _pinned_size(has_routines=...).
+_PINNED_WITH_WIDGETS = (760, 754)
+# Extra height the saved-routines row needs when present.
+_PINNED_ROUTINES_EXTRA = 74
 
 _WEEKDAYS_KO = ["월", "화", "수", "목", "금", "토", "일"]
 
 
-def _pinned_size(show_clock: bool, show_media: bool):
+def _pinned_size(show_clock: bool, show_media: bool, has_routines: bool = False):
     if show_clock or show_media:
-        return _PINNED_WITH_WIDGETS
+        w, h = _PINNED_WITH_WIDGETS
+        return (w, h + _PINNED_ROUTINES_EXTRA) if has_routines else (w, h)
     return _SIZES["idle_pinned"]
 
 
@@ -172,9 +192,18 @@ _MEDIA_PLAYERS = (
 )
 
 
+def _parse_seconds(value: str) -> float:
+    """AppleScript real/number → float seconds, tolerant of junk."""
+    try:
+        return max(0.0, float((value or "").strip()))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _now_playing():
-    """(title, artist, app_name, is_playing) from Music or Spotify, or None
-    if neither app has a loaded track.
+    """(title, artist, app_name, is_playing, position, duration) from Music or
+    Spotify, or None if neither app has a loaded track. `position`/`duration`
+    are seconds (floats) for the playback slider.
 
     Includes PAUSED tracks, not just playing ones — otherwise pausing music
     would make the whole media card (and its resume/next/prev buttons)
@@ -201,13 +230,22 @@ def _now_playing():
                 f'tell application "{app_name}" to if player state is not stopped then '
                 'return (name of current track) & "|||" & (artist of current track)'
                 ' & "|||" & (player state as string)'
+                ' & "|||" & (player position as string)'
+                ' & "|||" & (duration of current track as string)'
             )
             res = subprocess.run(["osascript", "-e", script],
                                  capture_output=True, text=True, timeout=3)
             out = (res.stdout or "").strip()
-            if res.returncode == 0 and out.count("|||") == 2:
-                title, artist, state = out.split("|||", 2)
-                return (title.strip(), artist.strip(), app_name, state.strip() == "playing")
+            if res.returncode == 0 and out.count("|||") == 4:
+                title, artist, state, position, duration = out.split("|||", 4)
+                pos = _parse_seconds(position)
+                dur = _parse_seconds(duration)
+                # Spotify reports track duration in milliseconds (position is
+                # already seconds); Music reports both in seconds.
+                if app_name == "Spotify":
+                    dur /= 1000.0
+                return (title.strip(), artist.strip(), app_name,
+                        state.strip() == "playing", pos, dur)
         except Exception:
             continue
     return None
@@ -286,6 +324,49 @@ def _load_routine_names() -> list[str]:
         return []
 
 
+# Shown in the command palette when the metrics DB has too few successful
+# commands to fill the list (fresh install, or history just cleared). Example
+# phrasings that double as a "here's what you can say" hint for new users.
+_FALLBACK_SUGGESTIONS = (
+    "사파리 열어줘",
+    "볼륨 30%로 맞춰줘",
+    "오늘 날씨 알려줘",
+    "메모 작성해줘",
+)
+
+
+def _load_command_suggestions(limit: int = 3) -> list[str]:
+    """Most-used successful commands for the pinned panel's command palette,
+    newest-first as a tiebreak — the natural-language strings agent.run() takes,
+    so a tap re-runs exactly what the user said before. Padded with curated
+    examples so the palette is never sparse, and returns those alone when there
+    is no usable history yet.
+    """
+    db = os.environ.get("VOICEDESK_DB", "data/command_history.db")
+    commands: list[str] = []
+    try:
+        import sqlite3
+        if os.path.exists(db):
+            with sqlite3.connect(db) as conn:
+                rows = conn.execute(
+                    "SELECT command, COUNT(*) AS n, MAX(timestamp) AS last "
+                    "FROM events WHERE success = 1 AND TRIM(command) != '' "
+                    "GROUP BY command ORDER BY n DESC, last DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            commands = [r[0].strip() for r in rows if r[0] and r[0].strip()]
+    except Exception:
+        commands = []
+    # Top up with fallback examples (skipping any already present) so the
+    # palette always shows a full row of `limit` items.
+    for example in _FALLBACK_SUGGESTIONS:
+        if len(commands) >= limit:
+            break
+        if example not in commands:
+            commands.append(example)
+    return commands[:limit]
+
+
 def _battery_status():
     """(percent, charging) read from `pmset -g batt`, or (None, False) if
     unavailable (desktop Mac, parse failure, etc.)."""
@@ -308,6 +389,163 @@ def _battery_info() -> str:
     if percent is None:
         return ""
     return f"{'⚡' if charging else '🔋'} {percent}%"
+
+
+# --- Todo store (pinned-panel calendar) -----------------------------------
+#
+# The calendar widget's per-day todo list is backed by this small JSON store,
+# the same "self-stored, voice/typed" shape the CalendarWidget's placeholder
+# left room for. Kept deliberately simple (a flat list persisted to one file)
+# and thread-safe, since Swift events arrive on the bridge's stdout-reader
+# thread while add/edit run on their own worker threads.
+
+_DEFAULT_TODOS_PATH = "data/todos.json"
+
+
+def _parse_todo_input(raw: str) -> tuple[str, str]:
+    """Split a typed todo into (text, time), pulling an OPTIONAL deadline off
+    the end. Time is normalized to 'HH:MM' (24h), or '' when absent.
+
+    Recognizes a trailing 'HH:MM' ('회의 14:00') or Korean 'N시 [M분]' with an
+    optional 오전/오후 ('회의 오후 2시', '점심 12시 30분'). Anything else is kept
+    verbatim as the todo text with no time.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ("", "")
+    # Trailing HH:MM (a leading token of text is required so a bare "14:00"
+    # stays as the todo text rather than becoming a timeless-but-empty entry).
+    m = re.match(r"^(.*\S)\s+(\d{1,2}):(\d{2})$", text)
+    if m:
+        h, mi = int(m.group(2)), int(m.group(3))
+        if 0 <= h <= 23 and 0 <= mi <= 59:
+            return (m.group(1).strip(), f"{h:02d}:{mi:02d}")
+    # Trailing Korean 'N시 [M분]' with optional 오전/오후.
+    m = re.match(r"^(.*?)\s*(오전|오후)?\s*(\d{1,2})\s*시\s*(?:(\d{1,2})\s*분)?$", text)
+    if m and m.group(3) and m.group(1).strip():
+        ampm, h, mi = m.group(2), int(m.group(3)), int(m.group(4) or 0)
+        if ampm == "오후" and h < 12:
+            h += 12
+        elif ampm == "오전" and h == 12:
+            h = 0
+        if 0 <= h <= 23 and 0 <= mi <= 59:
+            return (m.group(1).strip(), f"{h:02d}:{mi:02d}")
+    return (text, "")
+
+
+def _next_event(todos: list[dict], today_iso: str, now_minutes: int) -> tuple[str, str]:
+    """(title, time) of today's next upcoming deadline, or ('', '').
+
+    "Next" = the earliest timed, not-done todo for `today_iso` whose time is
+    still in the future. A deadline shows until the clock reaches it: at 14:00
+    a 14:00 item stops being "next" and a 15:00 item takes over (strict >).
+    """
+    best = None  # (minutes, title, time)
+    for t in todos:
+        if t.get("date") != today_iso or t.get("done"):
+            continue
+        m = re.match(r"^(\d{2}):(\d{2})$", t.get("time") or "")
+        if not m:
+            continue
+        mins = int(m.group(1)) * 60 + int(m.group(2))
+        if mins <= now_minutes:
+            continue
+        if best is None or mins < best[0]:
+            best = (mins, t.get("text", ""), t["time"])
+    return (best[1], best[2]) if best else ("", "")
+
+
+class TodoStore:
+    """Flat, file-backed list of todos ({id, date, time, text, done}).
+
+    All mutations persist immediately (atomic replace) and are guarded by a
+    lock so the bridge reader thread and the add/edit workers can't corrupt
+    the list. Missing/garbage files degrade to an empty store rather than
+    raising, so a first run just starts blank.
+    """
+
+    def __init__(self, path: str = _DEFAULT_TODOS_PATH):
+        self._path = path
+        self._lock = threading.Lock()
+        self._items = self._load()
+
+    @staticmethod
+    def _norm(d: dict) -> dict:
+        return {
+            "id": str(d.get("id") or uuid.uuid4().hex),
+            "date": str(d.get("date") or ""),
+            "time": str(d.get("time") or ""),
+            "text": str(d.get("text") or ""),
+            "done": bool(d.get("done", False)),
+        }
+
+    def _load(self) -> list[dict]:
+        try:
+            with open(self._path, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return [self._norm(d) for d in data if isinstance(d, dict)]
+        except Exception:
+            pass
+        return []
+
+    def _save(self) -> None:
+        try:
+            parent = os.path.dirname(self._path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            tmp = f"{self._path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._items, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self._path)
+        except Exception:
+            pass
+
+    def all(self) -> list[dict]:
+        with self._lock:
+            return [dict(it) for it in self._items]
+
+    def get(self, todo_id: str) -> dict | None:
+        with self._lock:
+            for it in self._items:
+                if it["id"] == todo_id:
+                    return dict(it)
+        return None
+
+    def add(self, date: str, text: str, time: str = "") -> dict:
+        item = self._norm({"date": date, "text": text, "time": time})
+        with self._lock:
+            self._items.append(item)
+            self._save()
+        return dict(item)
+
+    def toggle(self, todo_id: str) -> bool:
+        with self._lock:
+            for it in self._items:
+                if it["id"] == todo_id:
+                    it["done"] = not it["done"]
+                    self._save()
+                    return True
+        return False
+
+    def update(self, todo_id: str, text: str, time: str = "") -> bool:
+        with self._lock:
+            for it in self._items:
+                if it["id"] == todo_id:
+                    it["text"] = text
+                    it["time"] = time or ""
+                    self._save()
+                    return True
+        return False
+
+    def delete(self, todo_id: str) -> bool:
+        with self._lock:
+            before = len(self._items)
+            self._items = [it for it in self._items if it["id"] != todo_id]
+            if len(self._items) != before:
+                self._save()
+                return True
+        return False
 
 
 class TextInputRequest:
@@ -532,8 +770,21 @@ class NotchHUD:
         self._text_request = None
         self._text_prompt = ""
         self._text_prefill = ""
+        # Calendar / todo store (pinned panel). Selection + month browsing live
+        # here (not in Swift @State) so they survive the text-input round-trip
+        # an add/edit does — otherwise adding a todo would snap the calendar
+        # back to today's view.
+        self._todos = TodoStore(os.environ.get("VOICEDESK_TODOS", _DEFAULT_TODOS_PATH))
+        self._cal_month_offset = 0
+        self._cal_selected_date = datetime.now().strftime("%Y-%m-%d")
+        # True while an inline todo add/edit field is focused — tells the Swift
+        # side to make the pinned panel key so the field can take keystrokes.
+        self._keyboard_active = False
         # gear icon in the pinned panel opens Settings, wired by main()
         self._on_open_settings = None
+        # tapping a command-palette suggestion runs it through the agent
+        # (with session locking) — wired by main()
+        self._on_run_command = None
         # Native Swift renderer
         self._bridge = None
         self._visible = False
@@ -595,6 +846,9 @@ class NotchHUD:
             self._pinned = not self._pinned
             if self._pinned:
                 self._fetch_media_async()
+            else:
+                # Collapsing the panel closes any open inline todo field.
+                self._keyboard_active = False
             self._render()
 
     def _schedule_hover_expand(self):
@@ -621,10 +875,12 @@ class NotchHUD:
     def set_state(self, state: str) -> None:
         self._state = state
         if state != "idle":
-            # Active-state UI always wins; drop any idle expansion.
+            # Active-state UI always wins; drop any idle expansion (and any
+            # inline todo edit that was holding keyboard focus with it).
             self._pinned = False
             self._hovering = False
             self._hover_inside = False
+            self._keyboard_active = False
         self._ensure_init()
         if not self._initialized:
             return
@@ -682,6 +938,36 @@ class NotchHUD:
 
         threading.Thread(target=_work, daemon=True).start()
 
+    def _run_command_async(self, command: str) -> None:
+        """Run a palette-tapped command through the agent off the main thread.
+        The callback (wired in main) owns session locking + agent execution;
+        we just hand it the string on a background thread so the stdout-reader
+        thread that delivers Swift events never blocks on a full command run."""
+        cb = self._on_run_command
+        if not cb:
+            return
+        import threading
+        threading.Thread(target=lambda: cb(command), daemon=True).start()
+
+    def _add_todo(self, date_iso: str, raw_text: str) -> None:
+        """Append a todo from the calendar's inline add-field. The raw text is
+        parsed for an optional trailing deadline (see _parse_todo_input); an
+        empty entry is ignored so a stray Enter doesn't add a blank row."""
+        text, deadline = _parse_todo_input(raw_text)
+        if not text:
+            return
+        self._todos.add(date_iso, text, deadline)
+        self._render()
+
+    def _update_todo(self, todo_id: str, raw_text: str) -> None:
+        """Rewrite a todo from the inline edit-field. An empty entry is treated
+        as a cancel (the original is kept) rather than blanking the row."""
+        text, deadline = _parse_todo_input(raw_text)
+        if not text:
+            return
+        if self._todos.update(todo_id, text, deadline):
+            self._render()
+
     def _control_media_async(self, applescript_command: str) -> None:
         """Send a transport command (previous track / next track / playpause)
         to whichever app is currently playing, then refresh the widget so the
@@ -700,6 +986,30 @@ class NotchHUD:
                 pass
             import time
             time.sleep(0.3)   # let the player's track/state settle first
+            self._fetch_media_async()
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _seek_media_async(self, position: float) -> None:
+        """Jump the current player to `position` seconds (from the HUD's
+        playback slider), then refresh so the widget reflects the new spot."""
+        app_name = self._media[2] if self._media else None
+        if not app_name:
+            return
+        import threading
+
+        pos = max(0.0, float(position))
+
+        def _work():
+            try:
+                from actions.applescript import run_applescript
+                run_applescript(
+                    f'tell application "{app_name}" to set player position to {pos:.2f}'
+                )
+            except Exception:
+                pass
+            import time
+            time.sleep(0.2)   # let the player's position settle first
             self._fetch_media_async()
 
         threading.Thread(target=_work, daemon=True).start()
@@ -772,9 +1082,15 @@ class NotchHUD:
         self._text_prefill = prefill
         self._text_request = req
         prev_state = self._state
+        # set_state("text_input") clears the pinned/hover flags (active UI wins);
+        # remember them so an in-panel entry (add/edit a todo) returns to the
+        # open pinned panel instead of collapsing the notch back down.
+        prev_pinned = self._pinned
         self.set_state("text_input")
         value = req.wait(timeout)
         self._text_request = None
+        if prev_state == "idle":
+            self._pinned = prev_pinned
         self.set_state(prev_state if prev_state != "text_input" else "executing")
 
         if front is not None:
@@ -798,6 +1114,12 @@ class NotchHUD:
     def set_open_settings_callback(self, callback) -> None:
         """Called when the pinned panel's gear icon is clicked."""
         self._on_open_settings = callback
+
+    def set_run_command_callback(self, callback) -> None:
+        """Called with a command string when a command-palette suggestion is
+        tapped. main() wires this to run the command through the agent under
+        the shared command lock (so it can't collide with a voice command)."""
+        self._on_run_command = callback
 
     def arm_danger_prompt(self, decision) -> None:
         """Route the danger_confirm buttons to `decision` (guard's waiter)."""
@@ -889,22 +1211,84 @@ class NotchHUD:
             routine_name = str(event.get("name", "")).strip()
             if routine_name:
                 self._run_routine_async(routine_name)
+        elif name == "commandSuggestion":
+            command = str(event.get("command", "")).strip()
+            if command:
+                self._run_command_async(command)
         elif name == "mediaPrev":
             self._control_media_async("previous track")
         elif name == "mediaNext":
             self._control_media_async("next track")
         elif name == "mediaPlayPause":
             self._control_media_async("playpause")
+        elif name == "mediaSeek":
+            try:
+                position = float(event.get("position", 0))
+            except (TypeError, ValueError):
+                position = 0.0
+            self._seek_media_async(position)
+        elif name == "calendarSelectDay":
+            date_iso = str(event.get("date", "")).strip()
+            if date_iso:
+                self._cal_selected_date = date_iso
+                self._render()
+        elif name == "calendarShiftMonth":
+            try:
+                delta = int(event.get("delta", 0))
+            except (TypeError, ValueError):
+                delta = 0
+            if delta:
+                self._cal_month_offset += delta
+                self._render()
+        elif name == "todoToggle":
+            todo_id = str(event.get("id", "")).strip()
+            if todo_id and self._todos.toggle(todo_id):
+                self._render()
+        elif name == "todoDelete":
+            todo_id = str(event.get("id", "")).strip()
+            if todo_id and self._todos.delete(todo_id):
+                self._render()
+        elif name == "todoAdd":
+            date_iso = str(event.get("date", "")).strip()
+            raw_text = str(event.get("text", ""))
+            if date_iso:
+                self._add_todo(date_iso, raw_text)
+        elif name == "todoUpdate":
+            todo_id = str(event.get("id", "")).strip()
+            raw_text = str(event.get("text", ""))
+            if todo_id:
+                self._update_todo(todo_id, raw_text)
+        elif name == "inlineEditBegin":
+            # An inline add/edit field took focus; the pinned panel's window must
+            # become key to receive keystrokes (Swift's HUDController keys it off
+            # keyboardActive). Only meaningful while the panel is open.
+            if not self._keyboard_active:
+                self._keyboard_active = True
+                self._render()
+        elif name == "inlineEditEnd":
+            if self._keyboard_active:
+                self._keyboard_active = False
+                self._render()
 
     def _render_payload(self) -> dict:
         visual = self._visual()
         sizes = _SIZES
         routine_names = []
+        command_suggestions = []
+        todos: list[dict] = []
+        next_event_title = ""
+        next_event_time = ""
         if visual == "idle_pinned":
             self._arm_widget_tick()
-            sizes = dict(_SIZES)
-            sizes["idle_pinned"] = _pinned_size(self._show_clock, self._show_media)
             routine_names = _load_routine_names()
+            command_suggestions = _load_command_suggestions()
+            todos = self._todos.all()
+            now = datetime.now()
+            next_event_title, next_event_time = _next_event(
+                todos, now.strftime("%Y-%m-%d"), now.hour * 60 + now.minute)
+            sizes = dict(_SIZES)
+            sizes["idle_pinned"] = _pinned_size(
+                self._show_clock, self._show_media, has_routines=bool(routine_names))
         base_w, base_h = sizes.get(visual, sizes["processing"])
         stt, llm, lm, tts, tv = self._provider or ("", "", "", "", "")
         media_title, media_artist = _media_line(self._media)
@@ -941,13 +1325,22 @@ class NotchHUD:
             "mediaPlaying": bool(self._media[3]) if self._media else False,
             "mediaArtwork": self._media_artwork or "",
             "mediaPlayerApp": self._media[2] if self._media else "",
+            "mediaPosition": float(self._media[4]) if self._media else 0.0,
+            "mediaDuration": float(self._media[5]) if self._media else 0.0,
             "routines": routine_names,
+            "commandSuggestions": command_suggestions,
             "battery": self._battery,
             "batteryPercent": battery_percent,
             "batteryCharging": battery_charging,
             "interactionSounds": self._interaction_sounds,
             "inputPrompt": self._text_prompt,
             "inputPrefill": self._text_prefill,
+            "todos": todos,
+            "calMonthOffset": self._cal_month_offset,
+            "calSelectedDate": self._cal_selected_date,
+            "nextEventTitle": next_event_title,
+            "nextEventTime": next_event_time,
+            "keyboardActive": self._keyboard_active,
         }
 
     def _render(self):
