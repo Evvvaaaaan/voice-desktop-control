@@ -102,6 +102,20 @@ def test_agent_fast_path_leaves_composite_commands_to_llm(mocker):
     mock_dispatch.assert_not_called()
 
 
+def test_agent_fast_path_leaves_enter_then_search_commands_to_llm(mocker):
+    """"chatgpt 들어가서 시계 검색해줘" is two steps (open ChatGPT, then
+    search) — it must reach the LLM ReAct loop instead of the fast path
+    treating the whole sentence as one Google search query."""
+    mock_llm = MagicMock()
+    agent = Agent(mock_llm, MagicMock(), MagicMock(), MagicMock(), MagicMock())
+    mock_dispatch = mocker.patch("agent.core.tools.dispatch")
+
+    result = agent.try_fast_path("chatgpt 들어가서 시계 검색해줘")
+
+    assert result is None
+    mock_dispatch.assert_not_called()
+
+
 def test_dispatch_launch_app_rejects_injection():
     result = dispatch("launch_app", {"app": 'Safari"; do shell script "rm -rf ~'})
     assert result.startswith("error: invalid app name")
@@ -852,6 +866,32 @@ def test_invalid_json_retried_then_recovers(mocker):
     )
     mock_speak.assert_called_once_with("사파리를 열었습니다", "Yuna", 200,
                                        tts_config=agent._tts)
+
+
+def test_llm_pre_planning_multiple_json_objects_uses_only_the_first(mocker):
+    """Weaker/local models (observed with Ollama llama3) sometimes pre-plan
+    several future steps as extra JSON objects — or trailing "Observation:
+    ..." prose — appended after the first one, even though the system
+    prompt asks for exactly one action per reply. This must NOT be treated
+    as invalid JSON (a plain json.loads() on the whole text fails with
+    "Extra data"); only the first object should be parsed and acted on, with
+    no corrective retry needed since it was valid JSON all along."""
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.return_value = (
+        '{"action": "launch_app", "params": {"app": "Safari"}, "done": true, '
+        '"response": "사파리를 열었습니다"}\n\n'
+        ' Observation: Safari is now open.\n\n'
+        '{"action": "speak_only", "params": {}, "done": true, "response": ""}'
+    )
+    agent = _make_agent(mock_llm)
+    mocker.patch("agent.core.tools.dispatch", return_value="ok")
+    mocker.patch("agent.core.speak")
+
+    result = agent.run("사파리 열어줘")
+
+    assert result == "사파리를 열었습니다"
+    assert mock_llm.complete.call_count == 1  # no retry needed
 
 
 def test_persistently_invalid_json_falls_back_honestly(mocker):

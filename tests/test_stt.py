@@ -65,7 +65,14 @@ def test_macos_adapter_uses_native_speech_framework_when_bundled(mocker):
     result = adapter.transcribe(b"fake_audio")
 
     assert result == "카카오 열어줘"
-    mock_request_cls.alloc.return_value.initWithURL_.return_value.setRequiresOnDeviceRecognition_.assert_called_once_with(True)
+    mock_request = mock_request_cls.alloc.return_value.initWithURL_.return_value
+    mock_request.setRequiresOnDeviceRecognition_.assert_called_once_with(True)
+    # English app/site names (spoken mid-Korean-sentence, e.g. "chatgpt 들어가서
+    # ...") are what the ko-KR on-device model most often mis-hears — bias the
+    # recognizer toward them instead of switching the whole request to English.
+    mock_request.setContextualStrings_.assert_called_once()
+    biased_words = mock_request.setContextualStrings_.call_args[0][0]
+    assert "ChatGPT" in biased_words
 
 
 def test_macos_adapter_falls_back_when_speech_framework_missing(mocker):
