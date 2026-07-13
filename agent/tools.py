@@ -60,7 +60,16 @@ def dispatch(action: str, params: dict) -> str:
         app = str(params.get("app", params.get("app_name", params.get("name", ""))) or "")
         if not _SAFE_APP_NAME.match(app):
             return f"error: invalid app name: {app}"
-        return run_applescript(f'tell application "{app}" to activate')
+        res = run_applescript(f'tell application "{app}" to activate')
+        if not res.startswith("error"):
+            # Pin the launched app as the command's target so later
+            # read_screen/click_element keep driving it even when the user
+            # focuses another window.
+            try:
+                accessibility.set_target_app(app)
+            except Exception:
+                pass
+        return res
     elif action == "open_url":
         url = str(params.get("url", "") or "")
         if not _SAFE_URL.match(url):
@@ -128,6 +137,11 @@ def dispatch(action: str, params: dict) -> str:
         if not accessibility.element_known(element_id):
             return (f"error: 알 수 없는 요소 id {element_id} — "
                     "read_screen을 먼저 실행하세요")
+        pressed = accessibility.press_element(element_id, bool(params.get("double")))
+        if pressed is not None:
+            return pressed
+        # No usable AX action — real mouse click is the one element path
+        # that still interferes with the user's pointer.
         center = accessibility.element_center(element_id)
         if center is None:
             return (f"error: 요소 {element_id}가 더 이상 존재하지 않아요 — "
@@ -135,9 +149,26 @@ def dispatch(action: str, params: dict) -> str:
         x, y = int(center[0]), int(center[1])
         if params.get("double"):
             double_click(x, y)
-            return f"double_clicked element {element_id} at {x},{y}"
+            return f"double_clicked element {element_id} at {x},{y} (mouse fallback)"
         click(x, y)
-        return f"clicked element {element_id} at {x},{y}"
+        return f"clicked element {element_id} at {x},{y} (mouse fallback)"
+    elif action == "set_value":
+        try:
+            element_id = int(params.get("id"))
+        except (TypeError, ValueError):
+            return "error: set_value requires integer param id"
+        text = params.get("text")
+        if text is None:
+            return "error: set_value requires param text"
+        text = str(text)
+        if len(text) >= _TEXT_INPUT_MIN_CHARS and _TEXT_INPUT_PROVIDER is not None:
+            confirmed = _TEXT_INPUT_PROVIDER(
+                "입력할 내용을 확인하거나 수정한 뒤 Enter를 눌러 주세요", text
+            )
+            if confirmed is None:
+                return "error: 사용자가 텍스트 입력을 취소했습니다"
+            text = confirmed
+        return accessibility.set_element_value(element_id, text)
     elif action == "screenshot":
         return f"screenshot_taken:{len(take_screenshot_with_grid())} bytes"
     elif action == "speak_only":

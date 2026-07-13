@@ -12,7 +12,7 @@ from agent import tools
 from actions.tts import speak
 from actions.applescript import run_applescript
 from actions.screen import take_screenshot_with_grid
-from actions.accessibility import snapshot_screen
+from actions.accessibility import snapshot_screen, clear_target_app
 
 # Computer-use tasks need room to screenshot → click → verify → correct.
 MAX_ITERATIONS = 8
@@ -28,7 +28,7 @@ _SCREEN_OBSERVATION_ACTIONS = {"screenshot", "click", "double_click", "move_mous
 # Snapshot-dependent actions can't be replayed from the hot cache (the id
 # refers to a screen that no longer exists), and read_screen alone does
 # nothing user-visible.
-_UNCACHEABLE_ACTIONS = {"speak_only", "read_screen", "click_element"}
+_UNCACHEABLE_ACTIONS = {"speak_only", "read_screen", "click_element", "set_value"}
 
 # Let the UI react (menu open, page transition) before re-reading elements.
 _ELEMENT_SETTLE_SEC = 0.4
@@ -92,13 +92,13 @@ class Agent:
             f"현재 활성 앱: {front or '알 수 없음'}. "
             "요청이 완전히 끝났으면 done=true로, 아니면 다음 단계를 수행하세요."
         )
-        if action in ("read_screen", "click_element"):
+        if action in ("read_screen", "click_element", "set_value"):
             # Window-use observations are text: read_screen's listing is
-            # already in dispatch_res, and after a click we re-read the
+            # already in dispatch_res, and after a click/set we re-read the
             # elements so the model verifies the result without a screenshot.
-            if action == "click_element" and not dispatch_res.startswith("error"):
+            if action != "read_screen" and not dispatch_res.startswith("error"):
                 time.sleep(_ELEMENT_SETTLE_SEC)
-                text += "\n클릭 후 화면 요소:\n" + snapshot_screen()
+                text += "\n현재 화면 요소:\n" + snapshot_screen()
             return {"role": "user", "content": text}
         if (
             getattr(self._llm, "supports_vision", False) is True
@@ -148,6 +148,13 @@ class Agent:
     def run(self, command: str) -> str:
         start = time.monotonic()
         retry = 0
+
+        # Each command decides its own target app (launch_app or first
+        # read_screen) — never inherit the previous command's pin.
+        try:
+            clear_target_app()
+        except Exception:
+            pass
 
         cached = self._cache.get(command)
         if cached:

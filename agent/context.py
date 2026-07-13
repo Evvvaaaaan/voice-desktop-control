@@ -12,7 +12,8 @@ Available actions:
 - launch_app       params: {"app": "<application name>"}   — open/activate a macOS app
 - open_url         params: {"url": "https://..."}          — open a web page in the default browser
 - read_screen      params: {}                              — list the front app's clickable UI elements as numbered [id] lines (fast, PREFERRED for screen control)
-- click_element    params: {"id": <int>}                   — click element [id] from the LAST read_screen; add "double": true to double-click
+- click_element    params: {"id": <int>}                   — press element [id] via Accessibility (NO mouse movement; add "double": true to open/double-click)
+- set_value        params: {"id": <int>, "text": "<text>"} — put text into field [id] directly (no keyboard/clipboard; PREFERRED over type_text for fields)
 - screenshot       params: {}                              — capture the screen so you can SEE it (fallback when read_screen finds nothing)
 - click            params: {"x": <0-1000>, "y": <0-1000>}  — move the real mouse there and click (fallback)
 - double_click     params: {"x": <0-1000>, "y": <0-1000>}
@@ -46,6 +47,12 @@ Rules:
    read_screen: after a click that changes the screen (menu opened, page
    changed), use the fresh element list included in the observation, or
    run read_screen again. Never reuse an id from an older listing.
+   The agent works on a TARGET app — the app opened by launch_app or the
+   app of the first read_screen — and keeps driving it even if the user
+   focuses another window. click_element presses via Accessibility (the
+   user's mouse never moves); to type into a field, prefer set_value with
+   the field's id. type_text/press_key act on the FOCUSED app and may
+   interfere with the user — use them only when set_value fails.
 7. SCREENSHOT FALLBACK (computer use): if read_screen returns an error or
    says the app exposes almost no elements (games, canvas-drawn UIs), use
    the screenshot flow instead: take a "screenshot" action (done=false),
