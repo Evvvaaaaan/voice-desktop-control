@@ -400,7 +400,11 @@ def main():
         # Listen for both the configured phrase and "hey jarvis" so the reliable
         # pre-trained model works alongside the user's chosen phrase.
         phrases = [config.activation.wake_phrase, "hey jarvis"]
-        wakeword = WakeWordListener(phrases, on_activation)
+        wakeword = WakeWordListener(
+            phrases, on_activation,
+            speech_amp=config.activation.wake_vad_speech_amp,
+            silence_frames=config.activation.wake_vad_silence_frames,
+        )
         wakeword.start()
 
     app = VoiceDeskMenuBar(agent, hud, settings_window, on_activation_callback=on_activation)

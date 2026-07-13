@@ -13,7 +13,10 @@ _PHRASE_TO_MODEL = {
 # The STT fallback transcribes with ko-KR, so an English wake phrase comes back
 # as its Korean transliteration ("hey desk" → "헤이 데스크"). Match those too.
 _PHRASE_VARIANTS = {
-    "hey desk": ["헤이 데스크", "에이 데스크", "헤이 데스크톱", "hey desk"],
+    "hey desk": [
+        "헤이 데스크", "에이 데스크", "헤이 데스크톱", "hey desk",
+        "하이 데스크", "해이 데스크", "헤이 데스",
+    ],
     "hey jarvis": ["헤이 자비스", "에이 자비스", "hey jarvis"],
 }
 
@@ -78,11 +81,15 @@ class WakeWordListener:
     short utterances with the STT adapter. Both share a single microphone stream.
     """
 
-    def __init__(self, phrase, callback):
+    def __init__(self, phrase, callback, speech_amp=500, silence_frames=5):
         """
         Args:
             phrase: A wake phrase string, or a list of phrases to listen for.
             callback: Callable invoked when any wake phrase is detected.
+            speech_amp: int16 mic amplitude that counts as speech, for the
+                STT-fallback VAD (tune down for quiet mics/rooms, up for noisy ones).
+            silence_frames: consecutive silent frames (~80ms each) that end
+                an utterance for the STT-fallback VAD.
         """
         if isinstance(phrase, str):
             phrases = [phrase]
@@ -92,6 +99,8 @@ class WakeWordListener:
         self._phrases = phrases
         self._models, self._stt_phrases = _resolve_targets(phrases)
         self._callback = callback
+        self._speech_amp = speech_amp
+        self._silence_frames = silence_frames
         self._running = False
         self._thread = None
         self._stt_busy = False
@@ -132,6 +141,10 @@ class WakeWordListener:
             if transcript and _phrase_matches(transcript, self._stt_phrases):
                 print(f"[WakeWord] STT wake phrase matched in: '{transcript}'", file=sys.stderr)
                 self._fire()
+            elif transcript:
+                # Logged so real mismatches (e.g. an unlisted transliteration)
+                # can be diagnosed and added to _PHRASE_VARIANTS with evidence.
+                print(f"[WakeWord] STT transcript did not match wake phrase: '{transcript}'", file=sys.stderr)
         except Exception as e:
             print(f"[WakeWord] STT match error: {e}", file=sys.stderr)
         finally:
@@ -166,8 +179,8 @@ class WakeWordListener:
             # Rolling buffer + simple energy VAD for the STT fallback path.
             from collections import deque
             buffer = deque(maxlen=int(sample_rate * 2 / chunk))  # ~2s of frames
-            SPEECH_AMP = 500      # int16 amplitude that counts as speech
-            SILENCE_FRAMES = 5    # ~0.4s of silence ends an utterance
+            SPEECH_AMP = self._speech_amp      # int16 amplitude that counts as speech
+            SILENCE_FRAMES = self._silence_frames  # silent frames that end an utterance
             in_speech = False
             silence_run = 0
 
