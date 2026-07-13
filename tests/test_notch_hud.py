@@ -1,3 +1,5 @@
+import types
+
 import pytest
 from ui.notch_hud import (
     NotchHUD,
@@ -119,6 +121,67 @@ def test_hover_exit_before_dwell_cancels_expansion():
     assert hud._hovering is False
 
 
+def test_hover_confirm_expands_immediately_without_dwell():
+    """A post-animation reconcile (cursor proven present) must expand at once,
+    not arm another dwell — this is what keeps a re-hover after a collapse
+    from feeling laggy."""
+    hud = _isolated_hud()
+    hud._hover_confirm()
+    assert hud._hover_inside is True
+    assert hud._hovering is True            # expanded now, no _hover_expand_fire needed
+
+
+def test_duplicate_hover_confirm_does_not_render_again():
+    """Animation completion can reconcile hover after Swift suppressed frame
+    resize artifacts. If the hover state is already current, rendering again
+    feeds a needless Python↔Swift loop during open/close."""
+    hud = _isolated_hud()
+    render_calls = []
+    hud._render = lambda: render_calls.append(1)
+    hud._hover_confirm()
+    hud._hover_confirm()
+    assert render_calls == [1]
+
+
+def test_duplicate_hover_exit_does_not_render_again():
+    hud = _isolated_hud()
+    render_calls = []
+    hud._render = lambda: render_calls.append(1)
+    hud._hover_exit()
+    assert render_calls == []
+
+
+def test_hover_confirm_ignored_when_not_idle():
+    hud = _isolated_hud()
+    hud._state = "listening"
+    hud._hover_confirm()
+    assert hud._hovering is False           # active-state UI wins, no peek expansion
+
+
+def test_hover_confirm_while_pinned_does_not_rerender_same_visual():
+    hud = _isolated_hud()
+    hud._pinned = True
+    render_calls = []
+    hud._render = lambda: render_calls.append(1)
+    hud._hover_confirm()
+    assert hud._hover_inside is True
+    assert hud._hovering is True
+    assert render_calls == []               # still idle_pinned, no Swift churn
+
+
+def test_hover_exit_while_pinned_does_not_rerender_same_visual():
+    hud = _isolated_hud()
+    hud._pinned = True
+    hud._hover_inside = True
+    hud._hovering = True
+    render_calls = []
+    hud._render = lambda: render_calls.append(1)
+    hud._hover_exit()
+    assert hud._hover_inside is False
+    assert hud._hovering is False
+    assert render_calls == []               # still idle_pinned
+
+
 def test_click_toggles_pin_when_idle():
     hud = _isolated_hud()
     hud._toggle_pin()
@@ -174,14 +237,14 @@ def test_visual_size_without_notch_is_passthrough():
     assert _visual_size("idle_collapsed") == (cw, ch, ch)
 
 
-def test_visual_size_adds_notch_inset_to_expanded_visuals():
+def test_visual_size_ignores_notch_inset_for_expanded_visuals():
     w, h = _SIZES["listening"]
     total_w, total_h, content_h = _visual_size(
         "listening", top_inset=32.0, notch_size=(185.0, 32.0)
     )
     assert total_w == w
-    assert total_h == h + 32.0     # window extends behind the notch band
-    assert content_h == h          # content stays in the visible region
+    assert total_h == h            # no transparent top band in expanded states
+    assert content_h == h
 
 
 def test_visual_size_collapsed_wraps_physical_notch_with_lip():
@@ -333,12 +396,25 @@ def test_render_payload_carries_structured_battery_fields(mocker):
     assert payload["battery"] == "⚡ 42%"
 
 
-def test_set_open_settings_callback_invoked_on_event():
+def test_set_open_settings_callback_scheduled_on_main_loop(mocker):
     hud = _isolated_hud()
     calls = []
-    hud.set_open_settings_callback(lambda: calls.append(1))
+    callback = lambda: calls.append(1)
+    call_after = mocker.Mock()
+    app_helper = types.SimpleNamespace(callAfter=call_after)
+    mocker.patch.dict(
+        "sys.modules",
+        {
+            "PyObjCTools": types.SimpleNamespace(AppHelper=app_helper),
+            "PyObjCTools.AppHelper": app_helper,
+        },
+    )
+
+    hud.set_open_settings_callback(callback)
     hud._on_swift_event({"event": "openSettings"})
-    assert calls == [1]
+
+    call_after.assert_called_once_with(callback)
+    assert calls == []
 
 
 def test_open_settings_event_survives_missing_callback():
@@ -351,6 +427,30 @@ def test_render_payload_carries_interaction_sounds_flag():
     hud.set_widgets(True, True, interaction_sounds=False)
     payload = hud._render_payload()
     assert payload["interactionSounds"] is False
+
+
+def test_render_skips_identical_payloads_and_hide_resets_cache():
+    class Bridge:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, payload):
+            self.sent.append(payload)
+            return True
+
+    hud = NotchHUD()
+    hud._initialized = True
+    hud._bridge = Bridge()
+    hud._visible = True
+
+    hud._render()
+    hud._render()
+    assert len(hud._bridge.sent) == 1
+
+    hud.hide()
+    hud._visible = True
+    hud._render()
+    assert len(hud._bridge.sent) == 3       # hide command + fresh render
 
 
 # ---------------------------------------------------------------------------
@@ -368,14 +468,20 @@ def test_text_input_request_resolve_and_timeout():
     assert TextInputRequest().wait(0.01) is None   # timeout → None
 
 
+def _wait_until_text_request_ready(hud, timeout=1.0):
+    import time
+    deadline = time.monotonic() + timeout
+    while hud._text_request is None and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+
 def test_request_text_input_returns_submitted_text():
     import threading
     hud = _isolated_hud()
     hud.set_state = lambda s: setattr(hud, "_state", s)
 
     def submit():
-        import time
-        time.sleep(0.05)
+        _wait_until_text_request_ready(hud)
         hud._on_swift_event({"event": "textSubmit", "text": "고친 내용"})
 
     threading.Thread(target=submit, daemon=True).start()
@@ -392,8 +498,7 @@ def test_request_text_input_cancel_returns_none():
     hud.set_state = lambda s: setattr(hud, "_state", s)
 
     def cancel():
-        import time
-        time.sleep(0.05)
+        _wait_until_text_request_ready(hud)
         hud._on_swift_event({"event": "textCancel"})
 
     threading.Thread(target=cancel, daemon=True).start()

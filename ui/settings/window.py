@@ -55,6 +55,9 @@ class SettingsWindow:
         print(f"Current config: STT={self._config.stt.provider}, LLM={self._config.llm.provider}")
 
     def _build_window(self) -> None:
+        if self._window is not None:
+            return
+
         import AppKit
         ensure_standard_edit_menu()
         self._window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -62,6 +65,10 @@ class SettingsWindow:
             AppKit.NSWindowStyleMaskTitled | AppKit.NSWindowStyleMaskClosable,
             AppKit.NSBackingStoreBuffered, False,
         )
+        try:
+            self._window.setReleasedWhenClosed_(False)
+        except Exception:
+            pass
         self._window.setTitle_("VoiceDesk 설정")
         cv = self._window.contentView()
 

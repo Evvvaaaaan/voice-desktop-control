@@ -483,6 +483,18 @@ class TestWindowNewPages:
         sw.show()
         assert appkit_mock.NSButton.alloc.return_value.initWithFrame_.call_count >= len(SettingsWindow.PAGES)
 
+    def test_show_reuses_existing_window(self, appkit_mock, default_config):
+        from ui.settings.window import SettingsWindow
+        sw = SettingsWindow(default_config, "/tmp/cfg.yaml")
+        sw.show()
+        sw.show()
+        assert (
+            appkit_mock.NSWindow.alloc.return_value
+            .initWithContentRect_styleMask_backing_defer_.call_count
+            == 1
+        )
+        assert sw._window.setReleasedWhenClosed_.call_args.args == (False,)
+
     def test_tab_button_handler_selects_matching_page(self, appkit_mock, default_config):
         from ui.settings.window import SettingsWindow
         sw = SettingsWindow(default_config, "/tmp/cfg.yaml")

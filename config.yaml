@@ -10,12 +10,12 @@ llm:
   openai_api_key: ""
   openai_model: gpt-4o
   ollama_url: http://localhost:11434
-  ollama_model: gemma4:e4b
+  ollama_model: llama3
   nvidia_api_key: ""
   nvidia_model: minimaxai/minimax-m3
 
 activation:
-  wake_word: true
+  wake_word: false
   wake_phrase: "hey desk"
   hotkey: true
   hotkey_binding: "alt+space"
