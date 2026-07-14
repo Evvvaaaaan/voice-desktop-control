@@ -245,6 +245,36 @@ def clear_target_app() -> None:
     _TARGET_NAME = None
 
 
+# Let the freshly-activated app finish its window-ordering before the click
+# glide starts; without this the first click can land mid-reorder.
+_ACTIVATE_SETTLE_SEC = 0.2
+
+
+def _activate_pid(pid: int) -> bool:
+    import AppKit
+    for app in AppKit.NSWorkspace.sharedWorkspace().runningApplications():
+        if int(app.processIdentifier()) == pid:
+            app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
+            return True
+    return False
+
+
+def activate_target_app() -> bool:
+    """Bring the pinned target app to the front. A real mouse click lands on
+    the TOPMOST window at that point, so the target must be frontmost or the
+    click could hit another app's window. True when the target is (already)
+    frontmost or was activated; False when no target is pinned or it is gone."""
+    if _TARGET_PID is None:
+        return False
+    _, pid = _frontmost_app()
+    if pid == _TARGET_PID:
+        return True
+    if not _activate_pid(_TARGET_PID):
+        return False
+    time.sleep(_ACTIVATE_SETTLE_SEC)
+    return True
+
+
 def press_element(element_id: int, double: bool = False):
     """Actuate a snapshotted element via its AX action — no cursor movement,
     works while the app is in the background. Returns the result string, or

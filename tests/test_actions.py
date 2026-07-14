@@ -590,3 +590,41 @@ def test_snapshot_errors_when_target_app_gone(monkeypatch):
     monkeypatch.setattr(ax, "_running_apps", lambda: [])
     text = ax.snapshot_screen()
     assert text.startswith("error: 대상 앱")
+
+
+def test_activate_target_app_false_without_target(monkeypatch):
+    from actions import accessibility as ax
+    monkeypatch.setattr(ax, "_TARGET_PID", None)
+    called = []
+    monkeypatch.setattr(ax, "_activate_pid", lambda pid: called.append(pid) or True)
+    assert ax.activate_target_app() is False
+    assert called == []
+
+
+def test_activate_target_app_skips_when_already_front(monkeypatch):
+    from actions import accessibility as ax
+    monkeypatch.setattr(ax, "_TARGET_PID", 123)
+    monkeypatch.setattr(ax, "_frontmost_app", lambda: ("TestApp", 123))
+    called = []
+    monkeypatch.setattr(ax, "_activate_pid", lambda pid: called.append(pid) or True)
+    assert ax.activate_target_app() is True
+    assert called == []
+
+
+def test_activate_target_app_activates_background_target(monkeypatch):
+    from actions import accessibility as ax
+    monkeypatch.setattr(ax, "_TARGET_PID", 123)
+    monkeypatch.setattr(ax, "_ACTIVATE_SETTLE_SEC", 0)
+    monkeypatch.setattr(ax, "_frontmost_app", lambda: ("OtherApp", 999))
+    called = []
+    monkeypatch.setattr(ax, "_activate_pid", lambda pid: called.append(pid) or True)
+    assert ax.activate_target_app() is True
+    assert called == [123]
+
+
+def test_activate_target_app_false_when_target_gone(monkeypatch):
+    from actions import accessibility as ax
+    monkeypatch.setattr(ax, "_TARGET_PID", 123)
+    monkeypatch.setattr(ax, "_frontmost_app", lambda: ("OtherApp", 999))
+    monkeypatch.setattr(ax, "_activate_pid", lambda pid: False)
+    assert ax.activate_target_app() is False
