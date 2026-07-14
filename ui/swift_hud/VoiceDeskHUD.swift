@@ -2094,9 +2094,129 @@ private struct HUDView: View {
     }
 }
 
+// MARK: - Screen-control overlay (border + cursor ring)
+
+/// Shown while VoiceDesk drives the real mouse: a colored border around every
+/// screen plus a halo ring that follows the cursor and pulses on clicks. All
+/// windows ignore mouse events so they never intercept the synthetic clicks.
+private final class CursorRingModel: ObservableObject {
+    @Published var pulseID = 0
+}
+
+private let controlAccent = Color(red: 0.35, green: 0.65, blue: 1.0)
+
+private struct ControlBorderView: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 12)
+            .strokeBorder(controlAccent.opacity(0.9), lineWidth: 4)
+            .padding(2)
+            .ignoresSafeArea()
+    }
+}
+
+private struct CursorRingView: View {
+    @ObservedObject var model: CursorRingModel
+    @State private var pulsing = false
+    var body: some View {
+        Circle()
+            .strokeBorder(controlAccent.opacity(0.9), lineWidth: 3)
+            .background(Circle().fill(controlAccent.opacity(0.15)))
+            .scaleEffect(pulsing ? 1.5 : 1.0)
+            .opacity(pulsing ? 0.3 : 1.0)
+            .animation(.easeOut(duration: 0.25), value: pulsing)
+            .onChange(of: model.pulseID) { _ in
+                pulsing = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    pulsing = false
+                }
+            }
+            .padding(4)
+    }
+}
+
+private final class ControlOverlayController {
+    private var borderWindows: [NSWindow] = []
+    private var ringWindow: NSWindow?
+    private var tracker: Timer?
+    private var clickMonitor: Any?
+    private let ringModel = CursorRingModel()
+    private let ringSize: CGFloat = 44
+
+    func set(on: Bool) {
+        if on { show() } else { hide() }
+    }
+
+    private func show() {
+        guard borderWindows.isEmpty else { return }
+        for screen in NSScreen.screens {
+            let window = overlayWindow(frame: screen.frame)
+            window.contentView = NSHostingView(rootView: ControlBorderView())
+            window.orderFrontRegardless()
+            borderWindows.append(window)
+        }
+        let ring = overlayWindow(
+            frame: NSRect(x: 0, y: 0, width: ringSize, height: ringSize))
+        ring.contentView = NSHostingView(rootView: CursorRingView(model: ringModel))
+        ring.orderFrontRegardless()
+        ringWindow = ring
+        moveRing()
+        tracker = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            self?.moveRing()
+        }
+        // pyautogui's CGEvent clicks pass through the window server, so a
+        // global monitor sees them and can drive the pulse animation.
+        clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] _ in
+            self?.ringModel.pulseID += 1
+        }
+    }
+
+    private func hide() {
+        tracker?.invalidate()
+        tracker = nil
+        if let monitor = clickMonitor {
+            NSEvent.removeMonitor(monitor)
+            clickMonitor = nil
+        }
+        for window in borderWindows { window.orderOut(nil) }
+        borderWindows.removeAll()
+        ringWindow?.orderOut(nil)
+        ringWindow = nil
+    }
+
+    private func moveRing() {
+        guard let ring = ringWindow else { return }
+        let p = NSEvent.mouseLocation
+        ring.setFrameOrigin(NSPoint(x: p.x - ringSize / 2, y: p.y - ringSize / 2))
+    }
+
+    private func overlayWindow(frame: NSRect) -> NSWindow {
+        let window = NSWindow(
+            contentRect: frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.level = NSWindow.Level(
+            rawValue: Int(CGWindowLevelForKey(.assistiveTechHighWindow)))
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.ignoresMouseEvents = true
+        window.collectionBehavior = [
+            .canJoinAllSpaces,
+            .stationary,
+            .ignoresCycle,
+            .fullScreenAuxiliary,
+        ]
+        window.isReleasedWhenClosed = false
+        return window
+    }
+}
+
 private final class HUDController {
     private let emitter = EventEmitter()
     private var snapshot = HUDSnapshot()
+    private let controlOverlay = ControlOverlayController()
     private var windows: [String: NSWindow] = [:]
     // Reusing the hosting view (instead of replacing contentView on every
     // render) is required for hover to work at all: recreating it tears down
@@ -2159,6 +2279,8 @@ private final class HUDController {
         case "render":
             snapshot = HUDSnapshot(raw)
             render()
+        case "control":
+            controlOverlay.set(on: raw["on"] as? Bool ?? false)
         case "hide":
             hide()
         case "quit":
@@ -2382,6 +2504,7 @@ private final class HUDController {
     }
 
     private func hide() {
+        controlOverlay.set(on: false)
         for window in windows.values {
             window.orderOut(nil)
         }
