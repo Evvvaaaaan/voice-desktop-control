@@ -114,10 +114,20 @@ def dispatch(action: str, params: dict) -> str:
                 pass
         return res
     elif action == "open_url":
-        url = str(params.get("url", "") or "")
+        raw_url = str(params.get("url", "") or "")
+        # Percent-encode BEFORE validating: a URL that carries spaces or
+        # non-ASCII in its path/query (a Google query, a Gmail compose body
+        # with real Korean text and spaces) would otherwise be rejected
+        # outright by _SAFE_URL. Encoding turns those into safe %XX/+ groups
+        # first; the netloc is left untouched, so the post-encode _SAFE_URL
+        # check still blocks any AppleScript-injection payload (embedded
+        # quotes/backslashes/spaces in the host) exactly as before.
+        try:
+            url = _percent_encode_url(raw_url)
+        except Exception:
+            return f"error: invalid url: {raw_url}"
         if not _SAFE_URL.match(url):
-            return f"error: invalid url: {url}"
-        url = _percent_encode_url(url)
+            return f"error: invalid url: {raw_url}"
         browser = str(params.get("browser", "") or "")
         if browser:
             if not _SAFE_APP_NAME.match(browser):

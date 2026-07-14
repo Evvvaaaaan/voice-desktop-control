@@ -179,6 +179,21 @@ def test_dispatch_open_url_percent_encodes_non_ascii_query(mocker):
     assert "%ED%81%B4%EB%A1%9C%EB%93%9C" in called_script
 
 
+def test_dispatch_open_url_allows_spaces_via_encoding(mocker):
+    """A URL carrying spaces/newlines in its query (a Gmail compose body, a
+    plain-text search) must be percent-encoded rather than rejected — the
+    encode-then-validate order lets these through while still producing a
+    safe, space-free URL for AppleScript's open location."""
+    mock_run = mocker.patch("agent.tools.run_applescript", return_value="")
+    url = ("https://mail.google.com/mail/?view=cm&fs=1"
+           "&su=성적 정정 요청&body=교수님 안녕하세요, 정정 부탁드립니다.")
+    result = dispatch("open_url", {"url": url})
+    assert not result.startswith("error")
+    script = mock_run.call_args[0][0]
+    assert " " not in script.split('open location "', 1)[1]  # no raw spaces in url
+    assert "view=cm" in script and "body=" in script          # compose params kept
+
+
 def test_dispatch_open_url_rejects_non_http():
     result = dispatch("open_url", {"url": "file:///etc/passwd"})
     assert result.startswith("error: invalid url")

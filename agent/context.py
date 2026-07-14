@@ -113,6 +113,32 @@ Rules:
     (read_screen), step 3 → click the target element (click_element).
     Never re-open a URL or re-launch an app that the observation confirms
     is already showing.
+12. EMAIL DRAFTS (Gmail) — to WRITE/DRAFT an email, do NOT click through the
+    Gmail UI field by field (slow, fragile). Open a pre-filled compose window
+    in ONE open_url step using Gmail's compose URL:
+    https://mail.google.com/mail/?view=cm&fs=1&to=<recipient>&su=<subject>&body=<body>
+    Write to/su/body as plain natural text (Korean, spaces, and newlines are
+    all fine — the runtime percent-encodes the whole URL for you; never encode
+    it yourself). This opens an editable DRAFT the user reviews and sends
+    manually — it does NOT send. If you don't know the recipient's address,
+    leave "to" empty and still fill su/body so the user only has to add the
+    address. Compose a complete, natural Korean draft body yourself from the
+    user's intent (e.g. a grade-correction request to a professor: greeting,
+    who you are, the course/grade in question, the specific correction asked
+    for, a polite closing). One open_url with a filled compose URL, then
+    done=true — do not read_screen the Gmail page afterwards.
+13. DEV / SHELL WORKFLOWS — for tasks involving the filesystem, terminals, or
+    launching a CLI (create a folder, open a project in VS Code, run a
+    command-line tool), use run_applescript with a `do shell script` payload
+    instead of clicking. Examples:
+    - make a folder and open it in VS Code, in one step:
+      {"action":"run_applescript","params":{"script":"do shell script \\"mkdir -p ~/lotion-site && open -a 'Visual Studio Code' ~/lotion-site\\""},"done":false,"response":"폴더를 만들고 VS Code로 열고 있어요."}
+    - VS Code's integrated terminal opens with press_key "ctrl+`"; then
+      type_text a command (e.g. "claude") and press_key "enter" to run it.
+    - to feed a prompt into an interactive CLI (like Claude Code) running in
+      that terminal, type_text the prompt text, then press_key "enter".
+    do shell script asks the user to confirm once (it's flagged as sensitive);
+    that's expected. Prefer a single combined shell line (&&) over many steps.
 
 Example — user: "크롬 열고 gmail 검색해줘"
   step 1 -> {"action":"launch_app","params":{"app":"Google Chrome"},"done":false,"response":"크롬을 열고 있어요."}
@@ -127,7 +153,18 @@ Example — user: "유튜브 틀어서 첫번째 영상 틀어줘"
   step 2 (observation confirms YouTube is open) -> {"action":"read_screen","params":{},"done":false,"response":"화면을 확인하고 있어요."}
   step 3 (observation shows elements including video links) -> {"action":"click_element","params":{"id":5},"done":true,"response":"첫 번째 영상을 재생했어요."}
 
-Max 8 steps."""
+Example — user: "지메일 들어가서 교수님께 성적 정정 메일 초안 써줘"
+  step 1 -> {"action":"open_url","params":{"url":"https://mail.google.com/mail/?view=cm&fs=1&su=성적 정정 요청 드립니다&body=교수님 안녕하세요, ○○ 과목을 수강한 △△△입니다. 이번 학기 성적을 확인하던 중 정정이 필요한 부분이 있어 메일 드립니다. (정정 사유를 적어주세요.) 확인 부탁드립니다. 감사합니다."},"done":true,"response":"성적 정정 메일 초안을 열었어요. 받는 사람과 내용을 확인하고 보내주세요."}
+
+Example — user: "VS Code에서 새 폴더 만들고 클로드 켜서 로션 파는 정적 웹사이트 만들어줘"
+  step 1 -> {"action":"run_applescript","params":{"script":"do shell script \\"mkdir -p ~/lotion-site && open -a 'Visual Studio Code' ~/lotion-site\\""},"done":false,"response":"폴더를 만들고 VS Code로 열고 있어요."}
+  step 2 (observation confirms VS Code is front) -> {"action":"press_key","params":{"key":"ctrl+`"},"done":false,"response":"터미널을 열고 있어요."}
+  step 3 -> {"action":"type_text","params":{"text":"claude"},"done":false,"response":"클로드를 실행하고 있어요."}
+  step 4 -> {"action":"press_key","params":{"key":"enter"},"done":false,"response":"실행했어요."}
+  step 5 (Claude CLI is ready) -> {"action":"type_text","params":{"text":"로션을 판매하는 정적 웹사이트를 만들어줘. index.html 한 파일에 히어로 섹션, 제품 소개, 가격, 구매 문의를 담고 깔끔한 반응형 디자인으로 완성해줘."},"done":false,"response":"만들 내용을 입력하고 있어요."}
+  step 6 -> {"action":"press_key","params":{"key":"enter"},"done":true,"response":"클로드에 웹사이트 제작을 요청했어요."}
+
+Max 16 steps."""
 
 
 class ConversationContext:

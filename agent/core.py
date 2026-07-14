@@ -18,7 +18,11 @@ from actions.accessibility import snapshot_screen, clear_target_app, release_ax_
 from diagnostics import trace
 
 # Computer-use tasks need room to screenshot → click → verify → correct.
-MAX_ITERATIONS = 8
+# Multi-stage requests (draft a Gmail message, scaffold a project in VS Code
+# and drive its terminal) chain many read/click/type steps, so the budget has
+# to be generous — 8 exhausted mid-task and the model gave up honestly. Each
+# step is still one LLM round-trip, so this is a ceiling, not a target.
+MAX_ITERATIONS = 16
 
 # These require seeing the screen to pick a meaningful (x, y) — without a
 # screenshot the model is just guessing coordinates. scroll is exempt: x/y
@@ -124,7 +128,9 @@ class Agent:
         retriever=None,
         routines=None,
         listen_confirm=None,
+        max_iterations: int = MAX_ITERATIONS,
     ):
+        self._max_iterations = max_iterations
         self._llm = llm
         self._guard = guard
         self._collector = collector
@@ -340,7 +346,7 @@ class Agent:
         trace(
             "agent.run.started",
             command=command,
-            max_iterations=MAX_ITERATIONS,
+            max_iterations=self._max_iterations,
             supports_vision=bool(getattr(self._llm, "supports_vision", False)),
         )
 
@@ -425,7 +431,7 @@ class Agent:
                 trace("memory.retrieval.failed", error_type=type(e).__name__, error=str(e))
         messages = self._context.to_messages(command, memory_block=memory_block)
         trace("llm.session.started", message_count=len(messages), memory_attached=bool(memory_block))
-        for i in range(MAX_ITERATIONS):
+        for i in range(self._max_iterations):
             llm_started = time.monotonic()
             trace("llm.request.started", iteration=i + 1, message_count=len(messages))
             try:
@@ -492,7 +498,7 @@ class Agent:
                     json_retries=json_retries,
                     raw_response=raw,
                 )
-                if json_retries < MAX_JSON_RETRIES and i < MAX_ITERATIONS - 1:
+                if json_retries < MAX_JSON_RETRIES and i < self._max_iterations - 1:
                     json_retries += 1
                     print(f"[Agent] Asking model to reformat as JSON (retry {json_retries}/{MAX_JSON_RETRIES})...", file=sys.stderr)
                     messages.append({"role": "assistant", "content": raw})
@@ -601,7 +607,7 @@ class Agent:
             # Feed an observation of the current state back so the LLM can
             # verify success and continue. Vision-capable providers get a
             # screenshot; others get a text-only observation.
-            if action != "speak_only" and i < MAX_ITERATIONS - 1:
+            if action != "speak_only" and i < self._max_iterations - 1:
                 # Detect identical consecutive actions: the model is stuck
                 # repeating itself (e.g. opening the same URL twice).
                 cur_key = (action, json.dumps(params, sort_keys=True))
@@ -636,7 +642,7 @@ class Agent:
         if not final_response:
             final_response = "오류: 명령을 끝까지 완료하지 못했어요. 좀 더 구체적으로 다시 말씀해 주세요."
             print("[Agent] Loop ended without a final response; using fallback.", file=sys.stderr)
-            trace("agent.run.exhausted", max_iterations=MAX_ITERATIONS)
+            trace("agent.run.exhausted", max_iterations=self._max_iterations)
 
         is_repeated = self._detector.record(command)
         self._context.add_turn(command, final_response)
