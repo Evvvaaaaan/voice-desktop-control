@@ -160,6 +160,22 @@ def test_ollama_builds_native_image_observation(mocker):
     assert obs["images"] == [base64.b64encode(b"\x89PNG_bytes").decode()]
 
 
+def test_ollama_pins_context_window_and_generation_cap(mocker):
+    """Without an explicit num_ctx Ollama silently drops the OLDEST prompt
+    tokens (system prompt + user command first) once the ReAct session
+    outgrows the small default window — the model then emits arbitrary,
+    unrelated actions with no error anywhere. num_predict bounds rambling
+    output; keep_alive avoids a full model reload between commands."""
+    from llm.ollama_adapter import OllamaAdapter
+    post = _mock_ollama_post(mocker, chat_content="완료")
+    adapter = OllamaAdapter(model="qwen2.5:7b-instruct")
+    adapter.complete([{"role": "user", "content": "안녕"}])
+    payload = post.call_args.kwargs["json"]
+    assert payload["options"]["num_ctx"] >= 8192
+    assert payload["options"]["num_predict"] > 0
+    assert payload["keep_alive"]
+
+
 def test_nvidia_adapter_uses_nvidia_base_url(mocker):
     from llm.nvidia_adapter import NvidiaAdapter, NVIDIA_BASE_URL
     mock_openai_cls = mocker.patch("llm.nvidia_adapter.OpenAI")

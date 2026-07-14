@@ -24,6 +24,24 @@ def _detect_vision_support(url: str, model: str) -> bool:
         return False
 
 
+# Ollama defaults num_ctx to a small window (2k/4k depending on version) and
+# silently drops the OLDEST tokens when the prompt exceeds it — which cuts the
+# system prompt (JSON format, tool rules) and the user's command first, so the
+# model starts emitting arbitrary, unrelated actions with no error anywhere.
+# The ReAct session (system prompt + history + per-step observations) needs an
+# explicit window sized for it.
+_NUM_CTX = 8192
+# One decision is a single small JSON object. Weak local models that ignore
+# "one object only" otherwise ramble for hundreds of tokens (pre-planned extra
+# steps, prose) — on local hardware every extra token is pure latency, and the
+# agent loop only reads the first JSON object anyway.
+_NUM_PREDICT = 512
+# With the default 5m keep_alive a pause between commands unloads the multi-GB
+# model, and the next command pays a full reload (disk I/O storm + seconds of
+# lag) before it can even start thinking.
+_KEEP_ALIVE = "30m"
+
+
 class OllamaAdapter(LLMBase):
     def __init__(self, url: str = "http://localhost:11434", model: str = "llama3"):
         self._url = url.rstrip("/")
@@ -38,7 +56,13 @@ class OllamaAdapter(LLMBase):
         try:
             resp = requests.post(
                 f"{self._url}/api/chat",
-                json={"model": self._model, "messages": messages, "stream": False},
+                json={
+                    "model": self._model,
+                    "messages": messages,
+                    "stream": False,
+                    "options": {"num_ctx": _NUM_CTX, "num_predict": _NUM_PREDICT},
+                    "keep_alive": _KEEP_ALIVE,
+                },
                 timeout=60,
             )
             print(f"[Ollama] HTTP Response status: {resp.status_code}", file=sys.stderr)
