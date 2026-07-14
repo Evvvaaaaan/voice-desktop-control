@@ -227,13 +227,13 @@ def _record_command(agent: Agent, hud: NotchHUD, stt_adapter,
         _PENDING_ACTIVATION.set()
         return
     try:
-        first = True
         while True:
             hud.set_state("listening")
-            # Follow-up rounds stop quickly when the user stays silent.
+            # Every round stops quickly when the user stays silent: 5s without
+            # speech returns to idle, leaving only the wake word listening.
             audio_bytes = record_audio(
                 duration=10, on_level=hud.update_mic_level, stop_on_silence=True,
-                no_speech_timeout=None if first else 5.0,
+                no_speech_timeout=5.0,
             )
 
             hud.set_state("processing")
@@ -257,7 +257,6 @@ def _record_command(agent: Agent, hud: NotchHUD, stt_adapter,
             import time
             time.sleep(1.5)
             hud.set_transcript("")
-            first = False
     except Exception as e:
         # A dead thread would leave the HUD stuck in its last state forever.
         import sys
@@ -304,6 +303,7 @@ def main():
                     config.hud.hover_to_expand, config.hud.interaction_sounds)
     from agent import tools as agent_tools
     agent_tools.set_text_input_provider(hud.request_text_input)
+    agent_tools.set_control_indicator_provider(hud.set_screen_control)
     guard = SafetyGuard(require_confirmation=config.safety.require_confirmation,
                         ui_confirm=hud.arm_danger_prompt)
     hud.show()

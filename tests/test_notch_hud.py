@@ -1284,3 +1284,57 @@ def test_render_payload_omits_todos_when_not_pinned():
     payload = hud._render_payload()
     assert payload["todos"] == []
     assert payload["nextEventTitle"] == "" and payload["nextEventTime"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Screen-control indicator
+# ---------------------------------------------------------------------------
+
+class _FakeBridge:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, payload):
+        self.sent.append(payload)
+        return True
+
+
+def _control_hud():
+    hud = _isolated_hud()
+    hud._bridge = _FakeBridge()
+    return hud
+
+
+def test_set_screen_control_sends_control_message():
+    hud = _control_hud()
+    hud.set_screen_control(True)
+    assert {"type": "control", "on": True} in hud._bridge.sent
+
+
+def test_set_screen_control_dedupes_repeat_calls():
+    hud = _control_hud()
+    hud.set_screen_control(True)
+    hud.set_screen_control(True)
+    assert hud._bridge.sent.count({"type": "control", "on": True}) == 1
+
+
+def test_screen_control_cleared_when_leaving_executing():
+    hud = _control_hud()
+    hud.set_state("executing")
+    hud.set_screen_control(True)
+    hud.set_state("success")
+    assert {"type": "control", "on": False} in hud._bridge.sent
+
+
+def test_screen_control_kept_while_still_executing():
+    hud = _control_hud()
+    hud.set_state("executing")
+    hud.set_screen_control(True)
+    hud.set_state("executing")
+    assert {"type": "control", "on": False} not in hud._bridge.sent
+
+
+def test_set_state_without_control_sends_nothing_extra():
+    hud = _control_hud()
+    hud.set_state("idle")
+    assert all(p.get("type") != "control" for p in hud._bridge.sent)

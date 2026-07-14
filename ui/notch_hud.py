@@ -785,6 +785,8 @@ class NotchHUD:
         # tapping a command-palette suggestion runs it through the agent
         # (with session locking) — wired by main()
         self._on_run_command = None
+        # True while the agent drives the real pointer (border + cursor ring)
+        self._screen_control = False
         # Native Swift renderer
         self._bridge = None
         self._visible = False
@@ -874,6 +876,10 @@ class NotchHUD:
     # ---- public API -----------------------------------------------------
     def set_state(self, state: str) -> None:
         self._state = state
+        if state != "executing" and self._screen_control:
+            # Pointer takeover is only meaningful while a command executes;
+            # any other state means it ended (success, error, or idle).
+            self.set_screen_control(False)
         if state != "idle":
             # Active-state UI always wins; drop any idle expansion (and any
             # inline todo edit that was holding keyboard focus with it).
@@ -885,6 +891,18 @@ class NotchHUD:
         if not self._initialized:
             return
         self._dispatch_render()
+
+    def set_screen_control(self, on: bool) -> None:
+        """Show/hide the screen-takeover indicator (screen border + cursor
+        ring) rendered by the Swift helper while VoiceDesk drives the mouse."""
+        on = bool(on)
+        if on == self._screen_control:
+            return
+        self._screen_control = on
+        if on:
+            self._ensure_init()
+        if self._bridge is not None:
+            self._bridge.send({"type": "control", "on": on})
 
     def set_provider_info(self, stt, llm, llm_model, tts, tts_voice) -> None:
         self._provider = (stt, llm, llm_model, tts, tts_voice)
