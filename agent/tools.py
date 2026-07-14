@@ -44,6 +44,25 @@ def set_text_input_provider(provider) -> None:
     _TEXT_INPUT_PROVIDER = provider
 
 
+_CONTROL_INDICATOR = None   # hud.set_screen_control, wired by main()
+
+
+def set_control_indicator_provider(provider) -> None:
+    global _CONTROL_INDICATOR
+    _CONTROL_INDICATOR = provider
+
+
+def _signal_screen_control() -> None:
+    """Tell the HUD the agent is about to drive the real pointer. The HUD
+    clears the indicator itself when the command leaves the executing state."""
+    if _CONTROL_INDICATOR is None:
+        return
+    try:
+        _CONTROL_INDICATOR(True)
+    except Exception:
+        pass
+
+
 def _to_logical(params):
     """Map normalized (0..1000) x/y to global screen points on the display
     the last screenshot actually captured. Global coordinates may be negative
@@ -109,6 +128,7 @@ def dispatch(action: str, params: dict) -> str:
         pt = _to_logical(params)
         if pt is None:
             return "error: click requires params x and y"
+        _signal_screen_control()
         click(*pt)
         print(f"[ComputerUse] Clicked at {pt[0]},{pt[1]}", file=sys.stderr)
         return f"clicked at {pt[0]},{pt[1]}"
@@ -116,6 +136,7 @@ def dispatch(action: str, params: dict) -> str:
         pt = _to_logical(params)
         if pt is None:
             return "error: double_click requires params x and y"
+        _signal_screen_control()
         double_click(*pt)
         print(f"[ComputerUse] Double-clicked at {pt[0]},{pt[1]}", file=sys.stderr)
         return f"double_clicked at {pt[0]},{pt[1]}"
@@ -123,6 +144,7 @@ def dispatch(action: str, params: dict) -> str:
         pt = _to_logical(params)
         if pt is None:
             return "error: move_mouse requires params x and y"
+        _signal_screen_control()
         move_mouse(*pt)
         print(f"[ComputerUse] Moved mouse to {pt[0]},{pt[1]}", file=sys.stderr)
         return f"moved to {pt[0]},{pt[1]}"
@@ -150,6 +172,7 @@ def dispatch(action: str, params: dict) -> str:
     elif action == "scroll":
         # Position is optional; scroll at the current pointer if not given.
         pt = _to_logical(params) or (0, 0)
+        _signal_screen_control()
         direction = params.get("direction", "down")
         amount = params.get("amount", 3)
         scroll(pt[0], pt[1], direction, amount)
@@ -170,6 +193,7 @@ def dispatch(action: str, params: dict) -> str:
         if not accessibility.element_known(element_id):
             return (f"error: 알 수 없는 요소 id {element_id} — "
                     "read_screen을 먼저 실행하세요")
+        _signal_screen_control()
         # A real mouse click lands on the topmost window at the point, so
         # the target app must be frontmost before the glide starts.
         try:

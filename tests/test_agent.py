@@ -1184,6 +1184,53 @@ def test_dispatch_click_element_requires_int_id():
     assert res.startswith("error: click_element")
 
 
+def test_dispatch_pointer_actions_signal_screen_control(mocker):
+    from agent import tools
+    mocker.patch("agent.tools.click")
+    mocker.patch("agent.tools.double_click")
+    mocker.patch("agent.tools.move_mouse")
+    mocker.patch("agent.tools.scroll")
+    mocker.patch("agent.tools.last_capture_rect", return_value=(0, 0, 1000, 800))
+    calls = []
+    tools.set_control_indicator_provider(lambda on: calls.append(on))
+    try:
+        dispatch("click", {"x": 500, "y": 500})
+        dispatch("double_click", {"x": 500, "y": 500})
+        dispatch("move_mouse", {"x": 500, "y": 500})
+        dispatch("scroll", {"direction": "down"})
+        assert calls == [True, True, True, True]
+    finally:
+        tools.set_control_indicator_provider(None)
+
+
+def test_dispatch_click_element_signals_screen_control(mocker):
+    from agent import tools
+    mocker.patch("actions.accessibility.element_known", return_value=True)
+    mocker.patch("actions.accessibility.activate_target_app", return_value=True)
+    mocker.patch("actions.accessibility.element_center", return_value=(10.0, 20.0))
+    mocker.patch("agent.tools.click")
+    calls = []
+    tools.set_control_indicator_provider(lambda on: calls.append(on))
+    try:
+        dispatch("click_element", {"id": 1})
+        assert calls == [True]
+    finally:
+        tools.set_control_indicator_provider(None)
+
+
+def test_dispatch_non_pointer_actions_do_not_signal(mocker):
+    from agent import tools
+    mocker.patch("agent.tools.run_applescript", return_value="ok")
+    calls = []
+    tools.set_control_indicator_provider(lambda on: calls.append(on))
+    try:
+        dispatch("speak_only", {})
+        dispatch("launch_app", {"app": "Safari"})
+        assert calls == []
+    finally:
+        tools.set_control_indicator_provider(None)
+
+
 # ---------- window-use agent loop integration ----------
 
 def _mk_agent(mock_llm):
