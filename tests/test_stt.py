@@ -125,6 +125,8 @@ def test_whisper_local_enables_vad_and_disables_context_carryover(mocker):
     kwargs = mock_instance.transcribe.call_args.kwargs
     assert kwargs["vad_filter"] is True
     assert kwargs["condition_on_previous_text"] is False
+    # domain vocabulary bias — app names Whisper otherwise mangles
+    assert "크롬" in kwargs["initial_prompt"]
 
 
 def test_whisper_local_drops_low_confidence_segments(mocker):
@@ -160,6 +162,39 @@ def test_whisper_local_drops_low_logprob_garble(mocker):
     adapter = WhisperLocalAdapter(model_size="base")
     result = adapter.transcribe(b"fake_audio")
     assert result == ""
+
+
+def test_whisper_local_keeps_borderline_confidence_speech(mocker):
+    """Ordinary short Korean commands routinely score between -0.8 and -1.2
+    on the local model even when heard correctly — the confidence floor must
+    not swallow them, or the assistant appears to have stopped hearing."""
+    from stt.whisper_local import WhisperLocalAdapter
+    mock_model = mocker.patch("stt.whisper_local.WhisperModel")
+    mock_instance = mock_model.return_value
+    mock_instance.transcribe.return_value = (
+        [MagicMock(text=" 크롬 열어줘", no_speech_prob=0.1, avg_logprob=-1.1)],
+        MagicMock(),
+    )
+    adapter = WhisperLocalAdapter(model_size="base")
+    assert adapter.transcribe(b"fake_audio") == "크롬 열어줘"
+
+
+def test_whisper_local_confidence_is_judged_per_utterance_not_per_segment(mocker):
+    """One weak short segment inside an otherwise confident command must not
+    truncate the command's middle — the accept/reject decision applies to
+    the whole utterance."""
+    from stt.whisper_local import WhisperLocalAdapter
+    mock_model = mocker.patch("stt.whisper_local.WhisperModel")
+    mock_instance = mock_model.return_value
+    mock_instance.transcribe.return_value = (
+        [
+            MagicMock(text=" 크롬 열고 유튜브", no_speech_prob=0.1, avg_logprob=-0.5),
+            MagicMock(text=" 재생", no_speech_prob=0.1, avg_logprob=-1.5),
+        ],
+        MagicMock(),
+    )
+    adapter = WhisperLocalAdapter(model_size="base")
+    assert adapter.transcribe(b"fake_audio") == "크롬 열고 유튜브 재생"
 
 
 def test_whisper_local_treats_pure_punctuation_result_as_no_speech(mocker):
