@@ -26,6 +26,9 @@ _APP_ALIASES = (
     (("사파리", "safari", "사파레"), "Safari", "사파리"),
     (("파인더", "finder"), "Finder", "파인더"),
     (("터미널", "terminal"), "Terminal", "터미널"),
+    # Whisper hears "iTerm2" as the Korean word "아이템 2" — route it
+    # deterministically here so it never reaches the LLM as a nonsense app.
+    (("아이텀", "아이텀2", "아이템", "아이템2", "iterm", "iterm2"), "iTerm", "아이텀"),
     (("메모", "노트", "notes"), "Notes", "메모"),
     (("캘린더", "calendar"), "Calendar", "캘린더"),
     (("메일", "mail"), "Mail", "메일"),

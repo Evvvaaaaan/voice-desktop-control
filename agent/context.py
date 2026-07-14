@@ -48,10 +48,14 @@ Rules:
    mis-transcriptions. Interpret phonetically similar Korean/English words as
    the intended app or action (e.g. "크름"/"그롬" → 크롬/Google Chrome,
    "그럼 열고 ..." → "크롬 열고 ...", "사파레" → Safari,
-   "지메일"/"쥐메일" → Gmail) instead of failing. Base such corrections
-   ONLY on phonetic similarity to what was actually said — NEVER
-   reinterpret a clearly named app/site/target toward a remembered
-   preference or frequently-used app from the user-memory block.
+   "지메일"/"쥐메일" → Gmail, "아이템 2"/"아이템 투" → iTerm2) instead of
+   failing. Base such corrections ONLY on phonetic similarity to what was
+   actually said — NEVER reinterpret a clearly named app/site/target toward
+   a remembered preference or frequently-used app from the user-memory
+   block. If the command still makes no sense after phonetic correction,
+   ask the user to repeat it (speak_only, done=true) — NEVER substitute a
+   target from earlier conversation turns or resume a previous task the
+   user did not just ask for.
 6. CONTROLLING THE SCREEN (window use): to click a button, link, field,
    menu item, or any on-screen element that has no direct command, FIRST
    run read_screen (done=false). It lists the front app's clickable

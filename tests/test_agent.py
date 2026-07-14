@@ -81,6 +81,28 @@ def test_agent_fast_path_launches_known_app_without_llm(mocker):
     mock_speak.assert_called_once_with("크롬을 열었어요.", "Yuna", 200, tts_config=mock_tts_cfg)
 
 
+def test_agent_fast_path_maps_whisper_iterm_mishearing(mocker):
+    """Whisper transcribes "iTerm2 열어줘" as "아이템 2 열어줘" — the fast
+    path must resolve it deterministically instead of handing a nonsense
+    app name to the LLM (which then drifts to unrelated targets)."""
+    mock_llm = MagicMock()
+    mock_guard = MagicMock()
+    mock_guard.check.return_value = True
+    mock_guard.is_dangerous.return_value = False
+    mock_detector = MagicMock()
+    mock_detector.record.return_value = False
+    agent = Agent(mock_llm, mock_guard, MagicMock(), mock_detector, MagicMock(voice="Yuna", rate=200))
+
+    mock_dispatch = mocker.patch("agent.core.tools.dispatch", return_value="")
+    mocker.patch("agent.core.speak")
+
+    result = agent.try_fast_path("아이템 2 열어줘")
+
+    assert result == "아이텀을 열었어요."
+    mock_dispatch.assert_called_once_with("launch_app", {"app": "iTerm"})
+    mock_llm.complete.assert_not_called()
+
+
 def test_agent_fast_path_opens_search_without_llm(mocker):
     mock_llm = MagicMock()
     mock_guard = MagicMock()
