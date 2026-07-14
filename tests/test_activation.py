@@ -116,3 +116,80 @@ def test_hotkey_refires_after_release():
     listener._on_release(kb.Key.space)
     listener._on_press(kb.Key.space)
     assert calls == [1, 1]
+
+
+# ---------------------------------------------------------------------------
+# Wake stream pause/resume and starvation watchdog
+# ---------------------------------------------------------------------------
+
+def test_pause_sets_flag_and_returns_when_no_stream_open():
+    listener = WakeWordListener("hey desk", lambda: None)
+    listener.pause(timeout=0.2)     # no stream open → returns immediately
+    assert listener._pause_requested.is_set()
+    listener.resume()
+    assert not listener._pause_requested.is_set()
+
+
+def test_module_helpers_control_active_listener():
+    from activation.wake_word import (
+        set_active_listener, pause_listening, resume_listening,
+    )
+    m = MagicMock()
+    set_active_listener(m)
+    try:
+        pause_listening()
+        m.pause.assert_called_once()
+        resume_listening()
+        m.resume.assert_called_once()
+    finally:
+        set_active_listener(None)
+    pause_listening()   # no active listener → must be a silent no-op
+    resume_listening()
+
+
+class _FakeInputStream:
+    """Context-manager stub whose callback is never invoked → no frames."""
+    def __init__(self, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def _fake_sounddevice(monkeypatch):
+    import sys
+    import types
+    fake_sd = types.ModuleType("sounddevice")
+    fake_sd.InputStream = _FakeInputStream
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sd)
+
+
+def test_stream_session_returns_when_stream_starves(monkeypatch):
+    """A stream that stops delivering frames must end the session (so the
+    listener reopens it) instead of blocking forever."""
+    import time
+    import activation.wake_word as ww
+    _fake_sounddevice(monkeypatch)
+    monkeypatch.setattr(ww, "_STARVATION_TIMEOUT_SEC", 0.05)
+
+    listener = WakeWordListener("hey desk", lambda: None)
+    listener._running = True
+    start = time.monotonic()
+    listener._stream_session(None)      # no frames ever arrive
+    assert time.monotonic() - start < 1.0
+    assert listener._stream_closed.is_set()
+
+
+def test_stream_session_exits_promptly_on_pause(monkeypatch):
+    import activation.wake_word as ww
+    _fake_sounddevice(monkeypatch)
+    monkeypatch.setattr(ww, "_STARVATION_TIMEOUT_SEC", 5.0)
+
+    listener = WakeWordListener("hey desk", lambda: None)
+    listener._running = True
+    listener._pause_requested.set()
+    listener._stream_session(None)      # must not wait out the 5s timeout
+    assert listener._stream_closed.is_set()

@@ -4,6 +4,7 @@ Covers: config read/write on save, page selection logic, CLI fallback.
 """
 import sys
 import types
+from datetime import datetime
 import pytest
 from unittest.mock import MagicMock, patch
 from config.loader import Config
@@ -131,7 +132,7 @@ class TestSettingsWindowInit:
         from ui.settings.window import SettingsWindow
         assert SettingsWindow.PAGES == [
             "General", "STT", "LLM", "TTS", "Routines", "Profile", "Metrics",
-            "Permissions", "About"
+            "Errors", "Permissions", "About"
         ]
 
 
@@ -288,6 +289,11 @@ class TestPageModulesNoAppKit:
             from ui.settings.page_metrics import build_metrics_page
             build_metrics_page(MagicMock(), str(tmp_path / "nonexistent.db"))
 
+    def test_error_log_page_no_appkit(self, tmp_path):
+        with patch.dict(sys.modules, {"AppKit": None}):
+            from ui.settings.page_error_log import build_error_log_page
+            build_error_log_page(MagicMock(), str(tmp_path / "nonexistent.db"))
+
     def test_about_page_no_appkit(self):
         with patch.dict(sys.modules, {"AppKit": None}):
             from ui.settings.page_about import build_about_page
@@ -336,6 +342,38 @@ class TestPageModulesWithAppKit:
         with patch("ui.settings.page_metrics.get_today_summary", return_value=fake_summary):
             build_metrics_page(parent, "/fake/path.db")
         assert parent.addSubview_.call_count >= 12
+
+    def test_error_log_page_adds_saved_pattern(self, appkit_mock, tmp_path):
+        from metrics.error_log import ErrorLogStore
+        from ui.settings.page_error_log import build_error_log_page
+        db_path = str(tmp_path / "commands.db")
+        ErrorLogStore(db_path).record_event(
+            "command.aborted", "trace-a", fields={"reason": "empty_transcript"}
+        )
+
+        parent = MagicMock()
+        builder = build_error_log_page(parent, db_path)
+
+        assert builder is not None
+        assert parent.addSubview_.call_count >= 10
+        builder._refresh_handler.act_(None)
+
+    def test_error_log_page_shows_read_error(self, appkit_mock, tmp_path, mocker):
+        from ui.settings.page_error_log import build_error_log_page
+        store = mocker.patch("ui.settings.page_error_log.ErrorLogStore")
+        store.return_value.patterns.side_effect = RuntimeError("database damaged")
+
+        parent = MagicMock()
+        build_error_log_page(parent, str(tmp_path / "commands.db"))
+
+        labels = [call.args[0] for call in appkit_mock.NSTextField.labelWithString_.call_args_list]
+        assert "로그 읽기 오류:" in labels
+
+    def test_error_log_page_displays_timestamp_in_local_time(self):
+        from ui.settings.page_error_log import _display_time
+        timestamp = "2026-07-14T00:00:00+00:00"
+        expected = datetime.fromisoformat(timestamp).astimezone().strftime("%m-%d %H:%M")
+        assert _display_time(timestamp) == expected
 
     def test_about_page_adds_four_labels(self, appkit_mock):
         from ui.settings.page_about import build_about_page
@@ -468,6 +506,14 @@ class TestWindowNewPages:
                 .initWithContentRect_styleMask_backing_defer_(None, None, None, None)
             sw._load_page("Metrics")
         assert sw._current_page == "Metrics"
+
+    def test_load_page_errors(self, appkit_mock, default_config):
+        from ui.settings.window import SettingsWindow
+        sw = SettingsWindow(default_config, "/tmp/cfg.yaml", db_path="")
+        sw._window = appkit_mock.NSWindow.alloc() \
+            .initWithContentRect_styleMask_backing_defer_(None, None, None, None)
+        sw._load_page("Errors")
+        assert sw._current_page == "Errors"
 
     def test_load_page_about(self, appkit_mock, default_config):
         from ui.settings.window import SettingsWindow

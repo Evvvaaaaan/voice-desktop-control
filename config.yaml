@@ -1,49 +1,52 @@
-stt:
-  provider: macos # macos | whisper_api | whisper_local
-  whisper_api_key: ""
-  whisper_local_model: base
-
-llm:
-  provider: ollama # ollama | claude | openai | nvidia
-  claude_api_key: ""
-  claude_model: claude-sonnet-4-6
-  openai_api_key: ""
-  openai_model: gpt-4o
-  ollama_url: http://localhost:11434
-  ollama_model: qwen2.5:7b-instruct
-  nvidia_api_key: ""
-  nvidia_model: minimaxai/minimax-m3
-
 activation:
-  wake_word: true
-  wake_phrase: "hey desk"
+  continuous: true
   hotkey: true
-  hotkey_binding: "alt+space"
-
-tts:
-  provider: macos # macos | nvidia
-  voice: Yuna
-  rate: 200
-  nvidia_api_key: ""
-  nvidia_function_id: "877104f7-e885-42b9-8de8-f6e4c6303969"
-  nvidia_voice: Chatterbox-Multilingual.ko-KR.Male
-  nvidia_language_code: ko-KR
-
-safety:
-  require_confirmation: true
-
+  hotkey_binding: alt+space
+  wake_phrase: hey desk
+  wake_vad_silence_frames: 5
+  wake_vad_speech_amp: 500
+  wake_word: true
+hud:
+  hover_to_expand: true
+  interaction_sounds: true
+  show_battery: true
+  show_clock: true
+  show_media: true
+llm:
+  claude_api_key: ''
+  claude_model: claude-sonnet-4-6
+  nvidia_api_key: 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
+  nvidia_model: meta/llama-4-maverick-17b-128e-instruct
+  ollama_model: qwen2.5:7b-instruct
+  ollama_url: http://localhost:11434
+  openai_api_key: ''
+  openai_model: gpt-4o
+  provider: ollama
 memory:
-  enabled: true
-  embedding_provider: auto # auto | openai | nvidia | ollama | off
-  openai_embedding_model: text-embedding-3-small
+  embedding_provider: auto
+  enabled: false
   nvidia_embedding_model: nvidia/nv-embedqa-e5-v5
   ollama_embedding_model: nomic-embed-text
+  openai_embedding_model: text-embedding-3-small
   retrieval_top_k: 3
-
+safety:
+  require_confirmation: true
+stt:
+  provider: whisper_local
+  whisper_api_key: ''
+  whisper_local_model: base
 suggestion:
+  check_interval_sec: 300
+  cooldown_min: 60
   enabled: true
-  check_interval_sec: 300 # lower to 30 to try suggestions quickly
-  startup_grace_sec: 300  # lower to 10 to try suggestions quickly
-  min_pattern_days: 3     # distinct days in the same hour to count as a habit
-  cooldown_min: 60        # at most 1 suggestion per hour
+  min_pattern_days: 3
   recent_run_suppress_min: 60
+  startup_grace_sec: 300
+tts:
+  nvidia_api_key: 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
+  nvidia_function_id: 877104f7-e885-42b9-8de8-f6e4c6303969
+  nvidia_language_code: ko-KR
+  nvidia_voice: Chatterbox-Multilingual.ko-KR.Male
+  provider: nvidia
+  rate: 200
+  voice: Yuna

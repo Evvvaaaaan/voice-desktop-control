@@ -15,6 +15,7 @@ from actions.applescript import run_applescript
 from actions.screen import take_screenshot_with_grid
 from stt.confirm import listen_for_confirmation, parse_yes_no
 from actions.accessibility import snapshot_screen, clear_target_app
+from diagnostics import trace
 
 # Computer-use tasks need room to screenshot → click → verify → correct.
 MAX_ITERATIONS = 8
@@ -41,7 +42,22 @@ _UNCACHEABLE_ACTIONS = {"speak_only", "read_screen", "click_element", "set_value
 # Let the UI react (menu open, page transition) before re-reading elements.
 _ELEMENT_SETTLE_SEC = 0.4
 
+# After launch_app / open_url the new window needs a moment to appear and
+# update its title. Without this the observation grabs the PREVIOUS app's
+# window title and the LLM doesn't realise the action already took effect.
+_APP_SETTLE_SEC = 0.6
+
+# Actions after which we should wait for the window to settle before observing.
+_SETTLE_ACTIONS = {"launch_app", "open_url"}
+
 _THINK_BLOCK_RE = re.compile(r'<think>.*?</think>', re.DOTALL)
+
+
+def _dispatch_failed(result) -> bool:
+    """Keep tool-result failure handling consistent across all agent paths."""
+    return isinstance(result, str) and (
+        result.startswith("error") or result == "routine_failed"
+    )
 
 
 def _strip_think(raw: str) -> str:
@@ -127,7 +143,7 @@ class Agent:
                              or params.get("key") or params.get("name") or "")
             self._memory.log_action(
                 command, action, target,
-                not (isinstance(dispatch_res, str) and dispatch_res.startswith("error")),
+                not _dispatch_failed(dispatch_res),
                 json.dumps(params, ensure_ascii=False)[:500],
             )
         except Exception as e:
@@ -147,24 +163,62 @@ class Agent:
             import sys
             print(f"[Memory] log_outcome failed: {e}", file=sys.stderr)
 
-    def _observe(self, action: str, dispatch_res: str) -> dict:
+    @staticmethod
+    def _step_summary(step_history: list[tuple[str, dict, str]]) -> str:
+        """One-line-per-step summary so the LLM can see what it already did."""
+        if not step_history:
+            return ""
+        lines = ["지금까지 수행한 단계:"]
+        for idx, (act, prm, res) in enumerate(step_history, 1):
+            brief = ", ".join(f"{k}={v!r}" for k, v in prm.items()) if prm else ""
+            lines.append(f"  {idx}. {act}({brief}) → {res}")
+        return "\n".join(lines)
+
+    def _observe(self, action: str, dispatch_res: str,
+                 step_history: list[tuple[str, dict, str]] | None = None) -> dict:
         """Build the post-action observation message fed back into the loop."""
+        # Give the window manager a moment after navigation actions so the
+        # observation reads the NEW window title, not the old one.
+        if action in _SETTLE_ACTIONS and not _dispatch_failed(dispatch_res):
+            time.sleep(_APP_SETTLE_SEC)
+
         try:
             front = run_applescript(
                 'tell application "System Events" to get name of first process whose frontmost is true'
             )
         except Exception:
             front = ""
-        text = (
-            f"관찰: 직전 동작 '{action}'의 결과는 '{dispatch_res}'입니다. "
-            f"현재 활성 앱: {front or '알 수 없음'}. "
-            "요청이 완전히 끝났으면 done=true로, 아니면 다음 단계를 수행하세요."
+
+        # Try to read the active window's title — crucial after open_url /
+        # launch_app so the LLM knows what page/app is now showing.
+        win_title = ""
+        if front:
+            try:
+                win_title = run_applescript(
+                    f'tell application "System Events" to get name '
+                    f'of front window of process "{front}"'
+                ) or ""
+            except Exception:
+                pass
+
+        parts = [
+            f"관찰: 직전 동작 '{action}'의 결과는 '{dispatch_res}'입니다.",
+            f"현재 활성 앱: {front or '알 수 없음'}"
+            + (f" — 창 제목: \"{win_title}\"" if win_title else "") + ".",
+        ]
+        if step_history:
+            parts.append(self._step_summary(step_history))
+        parts.append(
+            "이미 수행한 동작을 반복하지 마세요. "
+            "요청의 다음 미완료 부분을 수행하거나, 전부 끝났으면 done=true로 응답하세요."
         )
+        text = "\n".join(parts)
+
         if action in ("read_screen", "click_element", "set_value"):
             # Window-use observations are text: read_screen's listing is
             # already in dispatch_res, and after a click/set we re-read the
             # elements so the model verifies the result without a screenshot.
-            if action != "read_screen" and not dispatch_res.startswith("error"):
+            if action != "read_screen" and not _dispatch_failed(dispatch_res):
                 time.sleep(_ELEMENT_SETTLE_SEC)
                 text += "\n현재 화면 요소:\n" + snapshot_screen()
             return {"role": "user", "content": text}
@@ -181,12 +235,15 @@ class Agent:
     def try_fast_path(self, command: str) -> str | None:
         parsed = parse_fast_path(command)
         if parsed is None:
+            trace("agent.fast_path.miss", command=command)
             return None
 
         start = time.monotonic()
         action, params, response_text = parsed
+        trace("agent.fast_path.selected", action=action, params=params)
         dangerous = self._guard.is_dangerous(action, params)
         if not self._guard.check(action, params):
+            trace("agent.fast_path.blocked", action=action, reason="safety_guard")
             speak("작업을 취소했습니다.", self._tts.voice, self._tts.rate, tts_config=self._tts)
             final_response = "취소됨"
             elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -196,7 +253,14 @@ class Agent:
             return final_response
 
         dispatch_res = tools.dispatch(action, params)
-        failed = isinstance(dispatch_res, str) and dispatch_res.startswith("error")
+        failed = _dispatch_failed(dispatch_res)
+        trace(
+            "agent.fast_path.completed",
+            action=action,
+            dispatch_result=dispatch_res,
+            failed=failed,
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
         final_response = (
             f"오류: 빠른 실행에 실패했어요. {dispatch_res}"
             if failed else response_text
@@ -216,6 +280,12 @@ class Agent:
     def run(self, command: str) -> str:
         start = time.monotonic()
         retry = 0
+        trace(
+            "agent.run.started",
+            command=command,
+            max_iterations=MAX_ITERATIONS,
+            supports_vision=bool(getattr(self._llm, "supports_vision", False)),
+        )
 
         # Each command decides its own target app (launch_app or first
         # read_screen) — never inherit the previous command's pin.
@@ -228,6 +298,7 @@ class Agent:
         if cached:
             import sys
             print(f"[Agent] Cache HIT for command '{command}': {cached}", file=sys.stderr)
+            trace("agent.cache.hit", command=command, cached_action=cached)
             action_str, params_str = cached.split(":", 1) if ":" in cached else (cached, "{}")
             try:
                 params_dict = json.loads(params_str)
@@ -238,6 +309,7 @@ class Agent:
                 app = params_dict.get("app", params_dict.get("app_name", params_dict.get("name", params_str)))
                 if not _SAFE.match(str(app)):
                     print(f"[Agent] Cached launch_app blocked: Invalid app name '{app}'", file=sys.stderr)
+                    trace("agent.cache.blocked", action="launch_app", reason="invalid_app_name")
                     return f"error: invalid app name: {app}"
                 print(f"[Agent] Executing cached launch_app for '{app}'...", file=sys.stderr)
                 result = run_applescript(f'tell application "{app}" to activate')
@@ -245,7 +317,7 @@ class Agent:
                 print(f"[Agent] Executing cached action '{action_str}' with {params_dict}...", file=sys.stderr)
                 result = tools.dispatch(action_str, params_dict)
             elapsed_ms = int((time.monotonic() - start) * 1000)
-            failed = isinstance(result, str) and result.startswith("error")
+            failed = _dispatch_failed(result)
             self._log_action(command, action_str, params_dict, result)
             self._log_outcome(command, not failed, elapsed_ms)
             self._set_state("error" if failed else "success")
@@ -255,6 +327,14 @@ class Agent:
                 speak("완료했습니다.", self._tts.voice, self._tts.rate, tts_config=self._tts)
             self._collector.record(command, 0.99, not failed, 0, False, elapsed_ms, False)
             print(f"[Agent] Cache execution finished. Result: {result}", file=sys.stderr)
+            trace(
+                "agent.cache.completed",
+                action=action_str,
+                params=params_dict,
+                dispatch_result=result,
+                failed=failed,
+                duration_ms=elapsed_ms,
+            )
             return result
 
         final_response = ""
@@ -266,6 +346,13 @@ class Agent:
         # a saved routine would consist of.
         executed_steps: list[dict] = []
         had_dangerous = False
+        # (action, params_json, dispatch_result) of every completed step — fed
+        # into _observe so the LLM always sees the full history of what it has
+        # done, preventing it from repeating actions blindly.
+        step_history: list[tuple[str, dict, str]] = []
+        # Track the previous step's (action, params) to detect identical
+        # consecutive actions and nudge the model forward.
+        prev_action_key: tuple[str, str] | None = None
         # Maintain one running message list so each step remembers the original
         # command and the assistant's prior actions/observations.
         memory_block = None
@@ -275,18 +362,36 @@ class Agent:
             except Exception as e:
                 import sys
                 print(f"[Memory] retrieval failed: {e}", file=sys.stderr)
+                trace("memory.retrieval.failed", error_type=type(e).__name__, error=str(e))
         messages = self._context.to_messages(command, memory_block=memory_block)
+        trace("llm.session.started", message_count=len(messages), memory_attached=bool(memory_block))
         for i in range(MAX_ITERATIONS):
+            llm_started = time.monotonic()
+            trace("llm.request.started", iteration=i + 1, message_count=len(messages))
             try:
                 raw = self._llm.complete(messages)
             except Exception as e:
                 import sys
                 print(f"[Agent] LLM call FAILED: {type(e).__name__}: {e}", file=sys.stderr)
+                trace(
+                    "llm.request.failed",
+                    iteration=i + 1,
+                    duration_ms=int((time.monotonic() - llm_started) * 1000),
+                    error_type=type(e).__name__,
+                    error=str(e),
+                )
                 if "Connection" in type(e).__name__ or "Connection" in str(e):
                     final_response = "오류: LLM 서버에 연결할 수 없어요. 설정에서 LLM 상태를 확인해 주세요."
                 else:
                     final_response = "오류: 명령을 처리하지 못했어요. LLM 설정을 확인해 주세요."
                 break
+
+            trace(
+                "llm.request.completed",
+                iteration=i + 1,
+                duration_ms=int((time.monotonic() - llm_started) * 1000),
+                raw_response=raw,
+            )
 
             # Clean up markdown code blocks or leading/trailing text from LLM response
             import sys
@@ -320,6 +425,13 @@ class Agent:
             except json.JSONDecodeError as e:
                 print(f"[Agent] JSON parsing FAILED. Error: {e}", file=sys.stderr)
                 print(f"[Agent] Raw output was: {raw}", file=sys.stderr)
+                trace(
+                    "llm.response.invalid_json",
+                    iteration=i + 1,
+                    error=str(e),
+                    json_retries=json_retries,
+                    raw_response=raw,
+                )
                 if json_retries < MAX_JSON_RETRIES and i < MAX_ITERATIONS - 1:
                     json_retries += 1
                     print(f"[Agent] Asking model to reformat as JSON (retry {json_retries}/{MAX_JSON_RETRIES})...", file=sys.stderr)
@@ -343,16 +455,26 @@ class Agent:
             done = parsed.get("done", False)
             response_text = _decode_stray_percent_encoding(parsed.get("response", ""))
             print(f"[Agent] Parsed: Action='{action}', Params={params}, Done={done}, Response='{response_text}'", file=sys.stderr)
+            trace(
+                "agent.decision",
+                iteration=i + 1,
+                action=action,
+                params=params,
+                done=done,
+                response=response_text,
+            )
 
             dangerous = self._guard.is_dangerous(action, params)
             if dangerous:
                 print(f"[Agent] Action flagged as DANGEROUS: {action}", file=sys.stderr)
+                trace("agent.decision.requires_confirmation", action=action, params=params)
                 self._set_state("danger_confirm")
                 had_dangerous = True
                 retry += 1
 
             if not self._guard.check(action, params):
                 print(f"[Agent] Action BLOCKED by Safety Guard: {action} with {params}", file=sys.stderr)
+                trace("agent.decision.denied", action=action, params=params)
                 speak("작업을 취소했습니다.", self._tts.voice, self._tts.rate, tts_config=self._tts)
                 final_response = "취소됨"
                 break
@@ -375,27 +497,38 @@ class Agent:
                     "vision-capable provider (Claude/OpenAI)."
                 )
                 print(f"[Agent] Blocked '{action}': current LLM has no vision support", file=sys.stderr)
+                trace("tool.dispatch.blocked", action=action, reason="vision_not_supported")
             else:
                 print(f"[Agent] Dispatching action '{action}' with {params}...", file=sys.stderr)
+                trace("tool.dispatch.started", iteration=i + 1, action=action, params=params)
                 dispatch_res = tools.dispatch(action, params)
             last_dispatch = dispatch_res
             print(f"[Agent] Dispatch result: '{dispatch_res}'", file=sys.stderr)
+            trace(
+                "tool.dispatch.completed",
+                iteration=i + 1,
+                action=action,
+                dispatch_result=dispatch_res,
+                failed=_dispatch_failed(dispatch_res),
+            )
             self._log_action(command, action, params, dispatch_res)
+            step_history.append((action, params, dispatch_res))
             # Same replay-safety reasoning as the hot cache: a saved routine
             # replays steps blindly via tools.dispatch with no LLM in the
             # loop, so an id from read_screen/click_element/set_value would
             # be meaningless (or worse, refer to a different element) on a
             # later run against a different screen state.
-            if action not in _UNCACHEABLE_ACTIONS and not dispatch_res.startswith("error"):
+            if action not in _UNCACHEABLE_ACTIONS and not _dispatch_failed(dispatch_res):
                 executed_steps.append({"action": action, "params": params})
 
             if done:
-                if dispatch_res.startswith("error"):
+                if _dispatch_failed(dispatch_res):
                     # Harness gate (verify before done): an action that just
                     # failed cannot claim completion. Reject done=true and fall
                     # through to the observation so the model can correct
                     # itself or report the failure honestly.
                     print(f"[Agent] done=true REJECTED: last action failed ('{dispatch_res}')", file=sys.stderr)
+                    trace("agent.done_rejected", action=action, dispatch_result=dispatch_res)
                 else:
                     # Only single-step, real actions are safe to cache: a
                     # multi-step command can't be replayed from one action and
@@ -409,14 +542,28 @@ class Agent:
             # verify success and continue. Vision-capable providers get a
             # screenshot; others get a text-only observation.
             if action != "speak_only" and i < MAX_ITERATIONS - 1:
-                messages.append(self._observe(action, dispatch_res))
+                # Detect identical consecutive actions: the model is stuck
+                # repeating itself (e.g. opening the same URL twice).
+                cur_key = (action, json.dumps(params, sort_keys=True))
+                if cur_key == prev_action_key:
+                    print(f"[Agent] Duplicate action detected: {action} {params}", file=sys.stderr)
+                    trace("agent.duplicate_action", action=action, params=params)
+                    messages.append({"role": "user", "content": (
+                        f"주의: 방금 '{action}'을(를) 동일한 파라미터로 다시 실행했습니다. "
+                        "이 동작은 이미 이전 단계에서 완료되었으니 반복하지 마세요. "
+                        "요청의 아직 수행하지 않은 다음 부분으로 넘어가세요."
+                    )})
+                else:
+                    messages.append(self._observe(action, dispatch_res,
+                                                 step_history=step_history))
+                prev_action_key = cur_key
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
         success = bool(
             final_response
             and final_response != "취소됨"
             and not final_response.startswith("오류")
-            and not last_dispatch.startswith("error")
+            and not _dispatch_failed(last_dispatch)
         )
         # The loop ran out of steps before the model set done=true (a long or
         # under-specified command). Without this the user would hear silence,
@@ -424,6 +571,7 @@ class Agent:
         if not final_response:
             final_response = "오류: 명령을 끝까지 완료하지 못했어요. 좀 더 구체적으로 다시 말씀해 주세요."
             print("[Agent] Loop ended without a final response; using fallback.", file=sys.stderr)
+            trace("agent.run.exhausted", max_iterations=MAX_ITERATIONS)
 
         is_repeated = self._detector.record(command)
         self._context.add_turn(command, final_response)
@@ -431,6 +579,14 @@ class Agent:
         self._collector.record(command, 0.95, success, retry,
                                self._guard.is_dangerous(action, params),
                                elapsed_ms, is_repeated)
+        trace(
+            "agent.run.completed",
+            success=success,
+            retry_count=retry,
+            final_action=action,
+            final_response=final_response,
+            duration_ms=elapsed_ms,
+        )
 
         # speak() blocks until the audio finishes playing (can be several
         # seconds for a long response, longer still when NVIDIA TTS fails and

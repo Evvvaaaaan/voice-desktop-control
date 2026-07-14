@@ -11,9 +11,11 @@ SWIFT_HUD_BINARY = "build/VoiceDeskHUD"
 DATA_FILES = [
     ("", ["config.yaml"]),
     ("swift_hud", [SWIFT_HUD_SOURCE, SWIFT_HUD_FONT]),
+    ("assets", ["assets/menubar-icon.png"]),
 ]
 OPTIONS = {
     "argv_emulation": False,
+    "iconfile": "assets/VoiceDesk.icns",
     "packages": [
         "anthropic", "openai", "pyautogui", "pynput",
         "faster_whisper", "sounddevice", "numpy", "PIL",
@@ -60,7 +62,7 @@ if "py2app" in sys.argv:
 setup(
     app=APP,
     packages=find_packages(exclude=("tests*", "build*", "dist*", "data*")),
-    py_modules=["main"],
+    py_modules=["main", "diagnostics"],
     include_package_data=False,
     package_data={"ui.swift_hud": ["VoiceDeskHUD.swift", "PretendardVariable.ttf"]},
     data_files=DATA_FILES,

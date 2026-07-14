@@ -188,6 +188,9 @@ def test_nvidia_vision_is_per_model(mocker):
     mocker.patch("llm.nvidia_adapter.OpenAI")
     from llm.nvidia_adapter import NvidiaAdapter
     assert NvidiaAdapter(api_key="k", model="deepseek-ai/deepseek-v4-pro").supports_vision is True
+    assert NvidiaAdapter(
+        api_key="k", model="meta/llama-4-maverick-17b-128e-instruct"
+    ).supports_vision is True
     assert NvidiaAdapter(api_key="k", model="meta/llama-3.2-90b-vision-instruct").supports_vision is True
     assert NvidiaAdapter(api_key="k", model="minimaxai/minimax-m3").supports_vision is False
     assert NvidiaAdapter(api_key="k", model="deepseek-ai/deepseek-v4-flash").supports_vision is False
@@ -197,7 +200,7 @@ def test_nvidia_adapter_default_model_is_top_tier(mocker):
     mocker.patch("llm.nvidia_adapter.OpenAI")
     from llm.nvidia_adapter import NvidiaAdapter
     a = NvidiaAdapter(api_key="k")
-    assert a._model == "deepseek-ai/deepseek-v4-pro"
+    assert a._model == "meta/llama-4-maverick-17b-128e-instruct"
 
 
 def test_get_adapter_returns_nvidia_adapter(mocker):

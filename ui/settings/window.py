@@ -16,6 +16,7 @@ _TABS = [
     ("Routines",    "list.bullet"),
     ("Profile",     "person.crop.circle"),
     ("Metrics",     "chart.bar"),
+    ("Errors",      "exclamationmark.triangle"),
     ("Permissions", "lock.shield"),
     ("About",       "info.circle"),
 ]
@@ -153,6 +154,7 @@ class SettingsWindow:
             "Routines":    self._build_routines,
             "Profile":     self._build_profile,
             "Metrics":     self._build_metrics,
+            "Errors":      self._build_errors,
             "Permissions": self._build_permissions,
             "About":       self._build_about,
         }.get(name, lambda: None)()
@@ -198,6 +200,13 @@ class SettingsWindow:
         from ui.settings.page_metrics import build_metrics_page
         try:
             build_metrics_page(self._body, self._db_path)
+        except Exception:
+            pass
+
+    def _build_errors(self):
+        from ui.settings.page_error_log import build_error_log_page
+        try:
+            self._page_builder = build_error_log_page(self._body, self._db_path)
         except Exception:
             pass
 

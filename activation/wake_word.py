@@ -25,6 +25,12 @@ _PHRASE_VARIANTS = {
 # a single "hey jarvis" triggers a burst of activations.
 _REFRACTORY_SEC = 3.0
 
+# A healthy input stream delivers a frame every 80ms (silence still arrives as
+# zero-filled frames). Receiving nothing for this long means the stream was
+# starved — macOS/PortAudio permanently stops a running input stream when a
+# second one opens on the same device — so the session reopens the stream.
+_STARVATION_TIMEOUT_SEC = 2.0
+
 _WORD_RE = re.compile(r"[^a-z0-9가-힣]+")
 
 
@@ -105,6 +111,13 @@ class WakeWordListener:
         self._thread = None
         self._stt_busy = False
         self._last_fire = 0.0
+        self._pause_requested = threading.Event()
+        self._stream_closed = threading.Event()
+        self._stream_closed.set()
+        # Makes "set pause flag" atomic against the session's "check flag then
+        # mark stream open", so pause() can never slip between the two and
+        # return while a stream is about to open.
+        self._stream_lock = threading.Lock()
 
     def _fire(self) -> bool:
         """Invoke the callback unless still inside the refractory window."""
@@ -122,6 +135,20 @@ class WakeWordListener:
 
     def stop(self) -> None:
         self._running = False
+
+    def pause(self, timeout: float = 3.0) -> None:
+        """Close the mic stream and wait until it is actually closed.
+
+        macOS/PortAudio permanently starves a running input stream the moment
+        a second stream opens on the same device, so anything that records
+        (command capture, confirmation capture) must pause the listener first
+        and resume() it once the mic is free again."""
+        with self._stream_lock:
+            self._pause_requested.set()
+        self._stream_closed.wait(timeout)
+
+    def resume(self) -> None:
+        self._pause_requested.clear()
 
     def _run_stt_match(self, audio_int16) -> None:
         """Transcribe a buffered utterance and fire the callback on a match."""
@@ -150,52 +177,95 @@ class WakeWordListener:
         finally:
             self._stt_busy = False
 
+    def _load_model(self):
+        import sys
+        if not self._models:
+            return None
+        import openwakeword
+        import openwakeword.utils
+        from openwakeword.model import Model
+
+        try:
+            return Model(wakeword_models=self._models, inference_framework="onnx")
+        except Exception as e:
+            print(f"[WakeWord] Model load failed ({e}); downloading...", file=sys.stderr)
+            try:
+                openwakeword.utils.download_models()
+                return Model(wakeword_models=self._models, inference_framework="onnx")
+            except Exception as down_err:
+                print(f"[WakeWord] Critical: could not load models: {down_err}", file=sys.stderr)
+                return None
+
     def _listen_loop(self) -> None:
         import sys
         try:
-            import numpy as np
-            import sounddevice as sd
-
-            model = None
-            if self._models:
-                import openwakeword
-                import openwakeword.utils
-                from openwakeword.model import Model
-
+            model = self._load_model()
+            while self._running:
+                if self._pause_requested.is_set():
+                    time.sleep(0.05)
+                    continue
                 try:
-                    model = Model(wakeword_models=self._models, inference_framework="onnx")
+                    self._stream_session(model)
                 except Exception as e:
-                    print(f"[WakeWord] Model load failed ({e}); downloading...", file=sys.stderr)
-                    try:
-                        openwakeword.utils.download_models()
-                        model = Model(wakeword_models=self._models, inference_framework="onnx")
-                    except Exception as down_err:
-                        print(f"[WakeWord] Critical: could not load models: {down_err}", file=sys.stderr)
-                        model = None
+                    print(f"[WakeWord] Stream error ({e}); reopening in 1s",
+                          file=sys.stderr)
+                    time.sleep(1.0)
+        except Exception as e:
+            print(f"[WakeWord] Listener thread error: {e}", file=sys.stderr)
 
-            sample_rate = 16000
-            chunk = 1280  # 80ms frames
+    def _stream_session(self, model) -> None:
+        """One microphone-stream lifetime: open, consume frames, detect.
 
-            # Rolling buffer + simple energy VAD for the STT fallback path.
-            from collections import deque
-            buffer = deque(maxlen=int(sample_rate * 2 / chunk))  # ~2s of frames
-            SPEECH_AMP = self._speech_amp      # int16 amplitude that counts as speech
-            SILENCE_FRAMES = self._silence_frames  # silent frames that end an utterance
-            in_speech = False
-            silence_run = 0
+        Returns (with the stream closed) when paused, stopped, or the stream
+        stops delivering frames — the caller reopens. Frames arrive via a
+        callback into a queue, so a starved stream shows up as a queue timeout
+        instead of blocking a read() call forever."""
+        import queue
+        import sys
+        from collections import deque
 
+        import numpy as np
+        import sounddevice as sd
+
+        sample_rate = 16000
+        chunk = 1280  # 80ms frames
+        frames: queue.Queue = queue.Queue(maxsize=64)
+
+        def _cb(indata, _n, _t, _status):
+            try:
+                frames.put_nowait(indata.copy().flatten())
+            except queue.Full:
+                pass
+
+        # Rolling buffer + simple energy VAD for the STT fallback path.
+        buffer = deque(maxlen=int(sample_rate * 2 / chunk))  # ~2s of frames
+        SPEECH_AMP = self._speech_amp      # int16 amplitude that counts as speech
+        SILENCE_FRAMES = self._silence_frames  # silent frames that end an utterance
+        in_speech = False
+        silence_run = 0
+        loop_counter = 0
+
+        with self._stream_lock:
+            if self._pause_requested.is_set():
+                return
+            self._stream_closed.clear()
+        try:
             with sd.InputStream(
-                samplerate=sample_rate, channels=1, dtype="int16", blocksize=chunk
-            ) as stream:
+                samplerate=sample_rate, channels=1, dtype="int16",
+                blocksize=chunk, callback=_cb,
+            ):
                 print(
                     f"[WakeWord] Listening — openwakeword={self._models}, "
                     f"stt_phrases={self._stt_phrases}",
                     file=sys.stderr,
                 )
-                loop_counter = 0
-                while self._running:
-                    audio_chunk, _ = stream.read(chunk)
-                    flat = audio_chunk.flatten()
+                while self._running and not self._pause_requested.is_set():
+                    try:
+                        flat = frames.get(timeout=_STARVATION_TIMEOUT_SEC)
+                    except queue.Empty:
+                        print("[WakeWord] Mic stream stopped delivering audio; reopening.",
+                              file=sys.stderr)
+                        return
                     max_amp = int(np.abs(flat).max())
 
                     loop_counter += 1
@@ -221,7 +291,7 @@ class WakeWordListener:
 
                     # --- STT literal-match path ---
                     if self._stt_phrases:
-                        buffer.append(flat.copy())
+                        buffer.append(flat)
                         if max_amp >= SPEECH_AMP:
                             in_speech = True
                             silence_run = 0
@@ -238,5 +308,27 @@ class WakeWordListener:
                                     args=(utterance,),
                                     daemon=True,
                                 ).start()
-        except Exception as e:
-            print(f"[WakeWord] Listener thread error: {e}", file=sys.stderr)
+        finally:
+            self._stream_closed.set()
+
+
+# The process-wide listener that pause_listening()/resume_listening() control.
+# Registered by main() so every other microphone consumer (command recording,
+# confirmation capture) can pause the wake stream instead of silently killing
+# it by opening a second stream on the same device.
+_active_listener = None
+
+
+def set_active_listener(listener) -> None:
+    global _active_listener
+    _active_listener = listener
+
+
+def pause_listening() -> None:
+    if _active_listener is not None:
+        _active_listener.pause()
+
+
+def resume_listening() -> None:
+    if _active_listener is not None:
+        _active_listener.resume()

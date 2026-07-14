@@ -8,7 +8,9 @@ NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 # screenshots (computer-use). Matched as substrings of the model id. Text-only
 # models (e.g. minimax-m3, deepseek-v4-flash) hang on image blocks, so vision
 # stays off for anything not listed here.
-_VISION_MODELS = ("deepseek-v4-pro", "vision", "-vl-", "vl-", "-omni")
+_VISION_MODELS = (
+    "deepseek-v4-pro", "llama-4-maverick", "vision", "-vl-", "vl-", "-omni",
+)
 
 
 class NvidiaAdapter(OpenAIAdapter):
@@ -21,7 +23,11 @@ class NvidiaAdapter(OpenAIAdapter):
     hang on image payloads.
     """
 
-    def __init__(self, api_key: str, model: str = "deepseek-ai/deepseek-v4-pro"):
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "meta/llama-4-maverick-17b-128e-instruct",
+    ):
         self._client = OpenAI(api_key=api_key, base_url=NVIDIA_BASE_URL,
                               timeout=30.0, max_retries=1)
         self._model = model

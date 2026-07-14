@@ -22,9 +22,11 @@ def _make_rumps_mock():
     mod = types.ModuleType("rumps")
 
     class FakeApp:
-        def __init__(self, name, icon=None, quit_button=None):
+        def __init__(self, name, title=None, icon=None, template=None, quit_button=None):
             self.name = name
-            self.title = name
+            self.title = title
+            self.icon = icon
+            self.template = template
             self.menu = []
 
         def run(self):  # pragma: no cover
@@ -268,13 +270,20 @@ class TestVoiceDeskMenuBar:
         bar._toggle(None)   # deactivate
         hud.set_state.assert_called_with("idle")
 
-    def test_toggle_changes_title(self, rumps_mock):
+    def test_init_uses_waveform_icon_without_text_title(self, rumps_mock):
+        from ui.menubar import VoiceDeskMenuBar
+        bar = VoiceDeskMenuBar(MagicMock(), MagicMock(), MagicMock())
+        assert bar.icon is not None
+        assert bar.icon.endswith("menubar-icon.png")
+        assert bar.title is None
+
+    def test_toggle_never_shows_text_or_mic(self, rumps_mock):
         from ui.menubar import VoiceDeskMenuBar
         bar = VoiceDeskMenuBar(MagicMock(), MagicMock(), MagicMock())
         bar._toggle(None)
-        assert bar.title == "🎤"
+        assert bar.title is None
         bar._toggle(None)
-        assert bar.title == "VoiceDesk"
+        assert bar.title is None
 
     def test_open_settings_calls_show(self, rumps_mock):
         from ui.menubar import VoiceDeskMenuBar
@@ -317,6 +326,24 @@ class TestRecordCommand:
         agent.run.return_value = "Done"
         _record_command(agent, hud, stt)
         hud.set_state.assert_any_call("success")
+
+    def test_wake_stream_paused_only_while_recording(self, mocker):
+        """The wake mic stream must be closed during record_audio (a second
+        input stream on the same device starves it permanently) and reopened
+        right after, even when the transcript comes back empty."""
+        order = []
+        mocker.patch("main.record_audio",
+                     side_effect=lambda **kw: order.append("record") or b"wav")
+        mocker.patch("main.pause_listening",
+                     side_effect=lambda: order.append("pause"))
+        mocker.patch("main.resume_listening",
+                     side_effect=lambda: order.append("resume"))
+        from main import _record_command
+        hud = MagicMock()
+        stt = MagicMock()
+        stt.transcribe.return_value = ""
+        _record_command(MagicMock(), hud, stt)
+        assert order == ["pause", "record", "resume"]
 
     def test_error_state_on_cancel(self, mocker):
         mocker.patch("main.record_audio", return_value=b"wav_bytes")
@@ -815,8 +842,8 @@ class TestContinuousMode:
                                               ["완료", "완료"])
         _record_command(agent, hud, stt, follow_up=True)
         assert agent.run.call_count == 2
-        # follow-up rounds use the quick no-speech timeout
-        assert rec.call_args_list[0].kwargs["no_speech_timeout"] is None
+        # every round uses the quick no-speech timeout: 5s of silence → idle
+        assert rec.call_args_list[0].kwargs["no_speech_timeout"] == 5.0
         assert rec.call_args_list[1].kwargs["no_speech_timeout"] == 5.0
         states = [c.args[0] for c in hud.set_state.call_args_list]
         assert states.count("listening") == 3      # 2 commands + final silent round

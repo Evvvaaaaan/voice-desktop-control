@@ -88,13 +88,13 @@ stt:
 macOS 무료 STT(`macos`, Google 웹 API 경유)보다 한국어 인식률이 높고 완전 오프라인입니다.
 첫 실행 시 모델을 자동 다운로드합니다(small ≈ 460MB).
 
-### LLM (두뇌) — 권장: NVIDIA `deepseek-ai/deepseek-v4-pro`
+### LLM (두뇌) — 권장: NVIDIA `meta/llama-4-maverick-17b-128e-instruct`
 
 ```yaml
 llm:
   provider: nvidia
   nvidia_api_key: nvapi-...
-  nvidia_model: deepseek-ai/deepseek-v4-pro
+  nvidia_model: meta/llama-4-maverick-17b-128e-instruct
 ```
 
 - **API 키 발급**: https://build.nvidia.com → 아무 모델 페이지 → **Get API Key** (신용카드 불필요, 무료)

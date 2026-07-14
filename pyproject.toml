@@ -33,7 +33,7 @@ dev = [
 ]
 
 [tool.setuptools]
-py-modules = ["main"]
+py-modules = ["main", "diagnostics"]
 include-package-data = false
 
 [tool.setuptools.packages.find]

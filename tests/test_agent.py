@@ -250,6 +250,92 @@ def test_agent_multistep_command_not_cached(mocker):
     assert agent._cache._freq.get(cmd, 0) == 0
 
 
+def test_multistep_observation_includes_step_history(mocker):
+    """After step 1 the observation fed to the LLM must contain a summary of
+    what the agent already did, so the model knows not to repeat it."""
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.side_effect = [
+        '{"action": "open_url", "params": {"url": "https://www.youtube.com"}, "done": false, "response": "열고 있어요"}',
+        '{"action": "read_screen", "params": {}, "done": false, "response": "확인 중"}',
+        '{"action": "speak_only", "params": {}, "done": true, "response": "완료"}',
+    ]
+    agent = _make_agent(mock_llm)
+    mocker.patch("agent.core.tools.dispatch", return_value="ok")
+    mocker.patch("agent.core.run_applescript", return_value="Google Chrome")
+    mocker.patch("agent.core.speak")
+    mocker.patch("agent.core.time.sleep")
+
+    agent.run("유튜브 틀어서 첫번째 영상 틀어줘")
+
+    # The second LLM call's messages must include step history text.
+    second_msgs = mock_llm.complete.call_args_list[1].args[0]
+    history_in_obs = any(
+        isinstance(m.get("content"), str) and "지금까지 수행한 단계" in m["content"]
+        for m in second_msgs
+    )
+    assert history_in_obs, "Step history was not included in the observation"
+
+
+def test_duplicate_action_triggers_warning(mocker):
+    """When the model issues the exact same action+params twice in a row,
+    the observation should contain a duplicate-action warning instead of the
+    normal observation — nudging the model to advance."""
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.side_effect = [
+        '{"action": "open_url", "params": {"url": "https://www.youtube.com"}, "done": false, "response": "열고 있어요"}',
+        # Model mistakenly repeats the exact same action:
+        '{"action": "open_url", "params": {"url": "https://www.youtube.com"}, "done": false, "response": "열고 있어요"}',
+        '{"action": "speak_only", "params": {}, "done": true, "response": "완료"}',
+    ]
+    agent = _make_agent(mock_llm)
+    mocker.patch("agent.core.tools.dispatch", return_value="ok")
+    mocker.patch("agent.core.run_applescript", return_value="Google Chrome")
+    mocker.patch("agent.core.speak")
+    mocker.patch("agent.core.time.sleep")
+
+    agent.run("유튜브 열어줘")
+
+    # Third LLM call should have the duplicate warning
+    third_msgs = mock_llm.complete.call_args_list[2].args[0]
+    dup_warning = any(
+        isinstance(m.get("content"), str) and "반복" in m["content"]
+        for m in third_msgs
+    )
+    assert dup_warning, "Duplicate-action warning was not injected"
+
+
+def test_observation_includes_window_title(mocker):
+    """After a navigation action (open_url / launch_app), the observation
+    should include the active window's title so the LLM knows what page it's on."""
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.side_effect = [
+        '{"action": "open_url", "params": {"url": "https://www.youtube.com"}, "done": false, "response": "열고 있어요"}',
+        '{"action": "speak_only", "params": {}, "done": true, "response": "완료"}',
+    ]
+    agent = _make_agent(mock_llm)
+    mocker.patch("agent.core.tools.dispatch", return_value="ok")
+    # First call: frontmost app name, second call: window title
+    mocker.patch("agent.core.run_applescript", side_effect=[
+        "Google Chrome", "YouTube - Google Chrome",
+    ])
+    mocker.patch("agent.core.speak")
+    mocker.patch("agent.core.time.sleep")
+
+    agent.run("유튜브 열어줘")
+
+    # The observation fed to the LLM (second call's messages) must contain the
+    # window title.
+    second_msgs = mock_llm.complete.call_args_list[1].args[0]
+    has_title = any(
+        isinstance(m.get("content"), str) and "YouTube" in m["content"]
+        for m in second_msgs
+    )
+    assert has_title, "Window title was not included in the observation"
+
+
 def test_agent_vision_provider_uses_text_observation_after_launch(mocker):
     mock_llm = MagicMock()
     mock_llm.supports_vision = True
@@ -688,6 +774,30 @@ def test_done_rejected_when_final_action_fails_then_recovers(mocker):
         isinstance(m.get("content"), str) and "error: app not found" in m["content"]
         for m in second_call_messages
     )
+
+
+def test_routine_failure_is_rejected_and_saved_as_a_tool_error(mocker, tmp_path):
+    from metrics.error_log import ErrorLogStore
+
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.side_effect = [
+        '{"action": "run_routine", "params": {"name": "없는 루틴"}, "done": true, "response": "완료했어요"}',
+        '{"action": "speak_only", "params": {}, "done": true, "response": "루틴을 실행하지 못했어요"}',
+    ]
+    agent = _make_agent(mock_llm)
+    db_path = str(tmp_path / "commands.db")
+    mocker.patch.dict("os.environ", {"VOICEDESK_TRACE": "0", "VOICEDESK_DB": db_path})
+    mocker.patch("agent.core.tools.dispatch", side_effect=["routine_failed", ""])
+    mocker.patch("agent.core.run_applescript", return_value="Finder")
+    mocker.patch("agent.core.speak")
+
+    result = agent.run("없는 루틴 실행해줘")
+
+    assert result == "루틴을 실행하지 못했어요"
+    assert mock_llm.complete.call_count == 2
+    patterns = ErrorLogStore(db_path).patterns()
+    assert patterns[0]["fingerprint"] == "tool.run_routine"
 
 
 def test_false_success_claim_never_spoken_when_action_keeps_failing(mocker):

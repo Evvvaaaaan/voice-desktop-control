@@ -21,7 +21,7 @@ class LLMConfig:
     ollama_url: str = "http://localhost:11434"
     ollama_model: str = "llama3"
     nvidia_api_key: str = ""
-    nvidia_model: str = "deepseek-ai/deepseek-v4-pro"
+    nvidia_model: str = "meta/llama-4-maverick-17b-128e-instruct"
 
 
 @dataclass

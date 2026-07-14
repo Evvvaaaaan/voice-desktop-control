@@ -49,7 +49,7 @@ try:
         print(f"→ {state}  transcript={transcript!r}")
         hud.set_state(state)
         if state == "listening":
-            hud.update_mic_level(0.6)   # harmless on a notched strip (no bars)
+            hud.update_mic_level(0.6)   # gives the live waveform a voice-level sample
         time.sleep(1.2)
         if transcript:
             # A second render: the strip grows DOWN to reveal the transcript.

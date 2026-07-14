@@ -1223,6 +1223,141 @@ private struct TextInputView: View {
     }
 }
 
+/// A microphone-responsive waveform that keeps a gentle motion between audio
+/// callbacks. It uses absolute timeline time so the 10 Hz Python bridge updates
+/// do not restart the animation while the user is speaking.
+private struct VoiceWaveGlyph: View {
+    let micBars: [CGFloat]
+    let accent: Color
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var activity: CGFloat {
+        let levels = micBars.isEmpty ? [CGFloat(0.08)] : micBars
+        let average = levels.reduce(0, +) / CGFloat(levels.count)
+        let peak = levels.max() ?? average
+        return min(1, max(0.16, average * 0.55 + peak * 0.45))
+    }
+
+    var body: some View {
+        TimelineView(
+            .animation(minimumInterval: reduceMotion ? 1 : 1.0 / 30.0, paused: reduceMotion)
+        ) { timeline in
+            Canvas { context, size in
+                guard size.width > 1, size.height > 1 else { return }
+
+                let time = timeline.date.timeIntervalSinceReferenceDate
+                let amplitude = size.height * (0.11 + activity * 0.24)
+
+                func wavePath(phase: CGFloat, frequency: CGFloat) -> Path {
+                    var path = Path()
+                    let steps = max(24, Int(size.width * 2))
+                    for index in 0...steps {
+                        let progress = CGFloat(index) / CGFloat(steps)
+                        let x = progress * size.width
+                        let envelope = 0.28 + 0.72 * CGFloat(sin(Double(progress * .pi)))
+                        let carrier = CGFloat(sin(
+                            time * 5.2 + Double(progress * frequency * 2 * .pi + phase)
+                        ))
+                        let shimmer = CGFloat(sin(
+                            time * -3.6 + Double(progress * 5 * .pi + phase)
+                        ))
+                        let y = size.height / 2 + (carrier + shimmer * 0.28) * amplitude * envelope
+                        let point = CGPoint(x: x, y: min(max(0, y), size.height))
+                        if index == 0 {
+                            path.move(to: point)
+                        } else {
+                            path.addLine(to: point)
+                        }
+                    }
+                    return path
+                }
+
+                let halo = wavePath(phase: .pi / 2, frequency: 1.15)
+                let wave = wavePath(phase: 0, frequency: 1.15)
+                context.stroke(
+                    halo,
+                    with: .color(accent.opacity(0.22)),
+                    style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round)
+                )
+                context.stroke(
+                    wave,
+                    with: .color(accent.opacity(0.96)),
+                    style: StrokeStyle(lineWidth: 1.7, lineCap: .round, lineJoin: .round)
+                )
+            }
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+/// A deterministic stream of particles for work that does not receive a
+/// continuous payload from Python. The phase comes from timeline time, keeping
+/// the flow smooth across ordinary HUD re-renders and changing state colors.
+private struct ParticleFlowGlyph: View {
+    let accent: Color
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(
+            .animation(minimumInterval: reduceMotion ? 1 : 1.0 / 30.0, paused: reduceMotion)
+        ) { timeline in
+            Canvas { context, size in
+                guard size.width > 1, size.height > 1 else { return }
+
+                let time = timeline.date.timeIntervalSinceReferenceDate
+                let centerY = size.height / 2
+                let samples = max(12, Int(size.width / 5))
+                var stream = Path()
+                for index in 0...samples {
+                    let progress = CGFloat(index) / CGFloat(samples)
+                    let x = progress * size.width
+                    let y = centerY + CGFloat(sin(time * 2.1 + Double(progress * 2 * .pi))) * size.height * 0.16
+                    if index == 0 {
+                        stream.move(to: CGPoint(x: x, y: y))
+                    } else {
+                        stream.addLine(to: CGPoint(x: x, y: y))
+                    }
+                }
+                context.stroke(
+                    stream,
+                    with: .color(accent.opacity(0.18)),
+                    style: StrokeStyle(lineWidth: 1, lineCap: .round)
+                )
+
+                for index in 0..<14 {
+                    let seed = Double(index)
+                    let speed = 0.19 + Double(index % 4) * 0.025
+                    let progress = (time * speed + seed * 0.127)
+                        .truncatingRemainder(dividingBy: 1)
+                    let x = CGFloat(progress) * (size.width + 10) - 5
+                    let wobble = CGFloat(sin(time * (2.3 + Double(index % 3) * 0.3) + seed * 1.7))
+                    let y = centerY + wobble * size.height * (0.13 + CGFloat(index % 3) * 0.035)
+                    let radius = CGFloat(1.3 + Double(index % 4) * 0.42)
+                    let fade = max(0, CGFloat(sin(progress * .pi)))
+                    let particleColor = index.isMultiple(of: 3)
+                        ? Color(red: 0.47, green: 0.72, blue: 1.0)
+                        : accent
+                    let outer = CGRect(
+                        x: x - radius * 1.8,
+                        y: y - radius * 1.8,
+                        width: radius * 3.6,
+                        height: radius * 3.6
+                    )
+                    let core = CGRect(
+                        x: x - radius,
+                        y: y - radius,
+                        width: radius * 2,
+                        height: radius * 2
+                    )
+                    context.fill(Path(ellipseIn: outer), with: .color(particleColor.opacity(0.16 * fade)))
+                    context.fill(Path(ellipseIn: core), with: .color(particleColor.opacity(0.82 * fade)))
+                }
+            }
+        }
+        .accessibilityHidden(true)
+    }
+}
+
 private struct HUDView: View {
     let snapshot: HUDSnapshot
     let size: VisualSize
@@ -1481,26 +1616,20 @@ private struct HUDView: View {
     }
 
     private var bars: some View {
-        let bars = snapshot.micBars.isEmpty ? Array(repeating: CGFloat(0.08), count: 6) : snapshot.micBars
-        return HStack(spacing: 8) {
-            ForEach(Array(bars.enumerated()), id: \.offset) { _, value in
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(accent)
-                    .frame(width: 6, height: max(3, value * max(1, size.contentHeight - 16)))
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        VoiceWaveGlyph(micBars: snapshot.micBars, accent: accent)
+            .padding(.horizontal, T.space4)
+            .padding(.vertical, T.space2)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var stateLabel: some View {
         VStack(spacing: T.space1) {
             HStack(spacing: T.space2) {
-                // Live activity indicator while the agent is working, so the
-                // wait never looks frozen.
+                // A local time-based particle stream keeps the wait visibly
+                // alive even when the Python bridge has no new work payload.
                 if snapshot.state == "processing" || snapshot.state == "executing" {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(accent)
+                    ParticleFlowGlyph(accent: accent)
+                        .frame(width: 54, height: 18)
                 } else {
                     Image(systemName: stateSymbol(snapshot.state))
                         .font(.system(size: 13, weight: .semibold))
@@ -1554,9 +1683,8 @@ private struct HUDView: View {
     // notch-height strip whose content flanks the notch as two "ears" (never
     // behind it), growing only left/right — see visualSize / notchStripVisuals.
 
-    /// SF Symbol for the active strip's left ear. The user's examples map here:
-    /// "..." (ellipsis) for listening, "!" (exclamationmark) for error; the two
-    /// working states use a spinner instead (see activeStripIcon).
+    /// SF Symbol for the active strip's terminal states. Listening and working
+    /// states use their own animated glyphs in `activeStripIcon` instead.
     private func stripSymbol(_ state: String) -> String {
         switch state {
         case "listening": return "ellipsis"
@@ -1568,16 +1696,25 @@ private struct HUDView: View {
 
     @ViewBuilder
     private var activeStripIcon: some View {
-        if snapshot.state == "processing" || snapshot.state == "executing" {
-            ProgressView()
-                .controlSize(.small)
-                .tint(accent)
+        if snapshot.state == "listening" {
+            VoiceWaveGlyph(micBars: snapshot.micBars, accent: accent)
+                .frame(width: stripEffectWidth, height: 18)
+        } else if snapshot.state == "processing" || snapshot.state == "executing" {
+            ParticleFlowGlyph(accent: accent)
+                .frame(width: stripEffectWidth, height: 18)
         } else {
             Image(systemName: stripSymbol(snapshot.state))
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(accent)
                 .symbolRenderingMode(.hierarchical)
         }
+    }
+
+    /// Keep custom activity visuals inside the left notch ear, leaving the
+    /// center cutout and the status text on the right completely unobstructed.
+    private var stripEffectWidth: CGFloat {
+        let earWidth = (size.width - size.notchWidth) / 2 - T.space4
+        return max(32, min(84, earWidth))
     }
 
     /// Active-state strip: state icon on the left ear, status message on the

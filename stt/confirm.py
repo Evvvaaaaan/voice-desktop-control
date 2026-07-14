@@ -42,12 +42,19 @@ def listen_for_confirmation(duration: int = 3) -> str:
     capture used by the danger-confirm flow and proactive suggestions."""
     import sounddevice as sd
     import tempfile, wave, os
+    from activation.wake_word import pause_listening, resume_listening
     from stt.macos_speech import MacOSSpeechAdapter
 
     sample_rate = 16000
-    audio = sd.rec(int(duration * sample_rate), samplerate=sample_rate,
-                   channels=1, dtype="int16")
-    sd.wait()
+    # The wake stream must be closed while recording: a second input stream
+    # on the same device permanently starves the first one.
+    pause_listening()
+    try:
+        audio = sd.rec(int(duration * sample_rate), samplerate=sample_rate,
+                       channels=1, dtype="int16")
+        sd.wait()
+    finally:
+        resume_listening()
 
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         with wave.open(f.name, "w") as wf:

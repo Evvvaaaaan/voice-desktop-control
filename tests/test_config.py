@@ -6,9 +6,9 @@ def test_load_defaults(default_config_dict, tmp_path):
     cfg_file = tmp_path / "config.yaml"
     cfg_file.write_text(yaml.dump(default_config_dict))
     config = load_config(str(cfg_file))
-    assert config.stt.provider == "macos"
-    assert config.llm.provider == "ollama"
-    assert config.activation.hotkey is True
+    assert config.stt.provider == default_config_dict["stt"]["provider"]
+    assert config.llm.provider == default_config_dict["llm"]["provider"]
+    assert config.activation.hotkey is default_config_dict["activation"]["hotkey"]
 
 def test_roundtrip(default_config_dict, tmp_path):
     cfg_file = tmp_path / "config.yaml"
@@ -27,7 +27,7 @@ def test_missing_optional_keys(tmp_path):
     config = load_config(str(cfg_file))
     assert config.stt.whisper_api_key == ""
     assert config.llm.claude_model == "claude-sonnet-4-6"
-    assert config.llm.nvidia_model == "deepseek-ai/deepseek-v4-pro"
+    assert config.llm.nvidia_model == "meta/llama-4-maverick-17b-128e-instruct"
     assert config.llm.nvidia_api_key == ""
     assert config.tts.provider == "macos"
     assert config.tts.nvidia_voice == "Chatterbox-Multilingual.ko-KR.Male"

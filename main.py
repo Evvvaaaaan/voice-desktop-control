@@ -3,6 +3,7 @@ import io
 import os
 import sys
 import threading
+import time
 import wave
 
 def _pre_load_portaudio() -> None:
@@ -51,7 +52,12 @@ from metrics.collector import MetricsCollector
 from routines.detector import RoutineDetector
 from routines.manager import RoutineManager
 from activation.hotkey import HotkeyListener
-from activation.wake_word import WakeWordListener
+from activation.wake_word import (
+    WakeWordListener,
+    pause_listening,
+    resume_listening,
+    set_active_listener,
+)
 from agent.core import Agent
 from memory.store import MemoryStore
 from memory.embedder import get_embedder
@@ -61,6 +67,7 @@ from memory.suggester import SuggestionEngine
 from ui.notch_hud import NotchHUD
 from ui.menubar import VoiceDeskMenuBar
 from ui.settings.window import SettingsWindow
+from diagnostics import command_trace, trace
 
 APP_NAME = "VoiceDesk"
 
@@ -228,35 +235,63 @@ def _record_command(agent: Agent, hud: NotchHUD, stt_adapter,
         return
     try:
         while True:
-            hud.set_state("listening")
-            # Every round stops quickly when the user stays silent: 5s without
-            # speech returns to idle, leaving only the wake word listening.
-            audio_bytes = record_audio(
-                duration=10, on_level=hud.update_mic_level, stop_on_silence=True,
-                no_speech_timeout=5.0,
-            )
+            with command_trace(
+                "voice", follow_up=follow_up, stt_adapter=type(stt_adapter).__name__
+            ):
+                hud.set_state("listening")
+                # Every round stops quickly when the user stays silent: 5s without
+                # speech returns to idle, leaving only the wake word listening.
+                # The wake stream must be closed while recording: a second input
+                # stream on the same device permanently starves the first one.
+                trace("audio.capture.started", max_duration_s=10, no_speech_timeout_s=5.0)
+                capture_started = time.monotonic()
+                pause_listening()
+                try:
+                    audio_bytes = record_audio(
+                        duration=10, on_level=hud.update_mic_level, stop_on_silence=True,
+                        no_speech_timeout=5.0,
+                    )
+                finally:
+                    resume_listening()
+                trace(
+                    "audio.capture.completed",
+                    duration_ms=int((time.monotonic() - capture_started) * 1000),
+                    audio_bytes=len(audio_bytes),
+                )
 
-            hud.set_state("processing")
-            command = stt_adapter.transcribe(audio_bytes)
-            if not command.strip():
-                hud.set_state("idle")
-                return
-            hud.set_transcript(command)
+                hud.set_state("processing")
+                trace("stt.transcription.started", provider=type(stt_adapter).__name__)
+                transcription_started = time.monotonic()
+                command = stt_adapter.transcribe(audio_bytes)
+                trace(
+                    "stt.transcription.completed",
+                    duration_ms=int((time.monotonic() - transcription_started) * 1000),
+                    transcript=command,
+                    transcript_chars=len(command),
+                )
+                if not command.strip():
+                    trace("command.aborted", reason="empty_transcript")
+                    hud.set_state("idle")
+                    return
+                hud.set_transcript(command)
 
-            hud.set_state("executing")
-            result = agent.try_fast_path(command) if isinstance(agent, Agent) else None
-            if result is None:
-                result = agent.run(command)
-            failed = (not result or result == "취소됨"
-                      or result.startswith(("error", "오류")))
-            hud.set_state("error" if failed else "success")
-            if failed or not follow_up:
-                return
-            # Continuous mode: brief success display, then listen again
-            # without requiring the wake word.
-            import time
-            time.sleep(1.5)
-            hud.set_transcript("")
+                hud.set_state("executing")
+                result = agent.try_fast_path(command) if isinstance(agent, Agent) else None
+                if result is None:
+                    trace("agent.route", route="react")
+                    result = agent.run(command)
+                else:
+                    trace("agent.route", route="fast_path", result=result)
+                failed = (not result or result == "취소됨"
+                          or result.startswith(("error", "오류")))
+                trace("command.result", failed=failed, result=result)
+                hud.set_state("error" if failed else "success")
+                if failed or not follow_up:
+                    return
+                # Continuous mode: brief success display, then listen again
+                # without requiring the wake word.
+                time.sleep(1.5)
+                hud.set_transcript("")
     except Exception as e:
         # A dead thread would leave the HUD stuck in its last state forever.
         import sys
@@ -270,7 +305,6 @@ def _record_command(agent: Agent, hud: NotchHUD, stt_adapter,
         except Exception:
             pass
     finally:
-        import time
         time.sleep(1.5)
         hud.set_transcript("")
         hud.set_state("idle")
@@ -344,16 +378,17 @@ def main():
     def _run_suggested(command: str) -> None:
         # The suggestion session already holds _COMMAND_LOCK; mirror
         # _record_command's executing tail minus recording/lock.
-        hud.set_transcript(command)
-        hud.set_state("executing")
-        result = agent.run(command)
-        failed = (not result or result == "취소됨"
-                  or result.startswith(("error", "오류")))
-        hud.set_state("error" if failed else "success")
-        import time
-        time.sleep(1.5)
-        hud.set_transcript("")
-        hud.set_state("idle")
+        with command_trace("hud"):
+            hud.set_transcript(command)
+            hud.set_state("executing")
+            result = agent.run(command)
+            failed = (not result or result == "취소됨"
+                      or result.startswith(("error", "오류")))
+            trace("command.result", failed=failed, result=result)
+            hud.set_state("error" if failed else "success")
+            time.sleep(1.5)
+            hud.set_transcript("")
+            hud.set_state("idle")
 
     def _run_from_hud(command: str) -> None:
         # A command-palette tap in the pinned panel. Take the same command
@@ -421,6 +456,7 @@ def main():
             silence_frames=config.activation.wake_vad_silence_frames,
         )
         wakeword.start()
+        set_active_listener(wakeword)
 
     app = VoiceDeskMenuBar(agent, hud, settings_window, on_activation_callback=on_activation)
     app.run()
