@@ -194,6 +194,35 @@ def test_dispatch_open_url_allows_spaces_via_encoding(mocker):
     assert "view=cm" in script and "body=" in script          # compose params kept
 
 
+def test_new_project_creates_folder_under_real_home_and_opens_editor(mocker, tmp_path):
+    """new_project must resolve the real home (not $HOME) and create the folder
+    in-process, so it works even when a packaged .app has a broken HOME / a
+    read-only cwd — the failure the shelled mkdir path hit."""
+    mocker.patch("agent.tools._user_home", return_value=str(tmp_path))
+    mock_open = mocker.patch("agent.tools.subprocess.run")
+    result = dispatch("new_project", {"name": "lotion-site", "base": "desktop"})
+    assert not result.startswith("error"), result
+    created = tmp_path / "Desktop" / "lotion-site"
+    assert created.is_dir()
+    # opened as a workspace via `open -a <editor> <folder>`, no shell
+    args = mock_open.call_args[0][0]
+    assert args[:3] == ["open", "-a", "Visual Studio Code"]
+    assert args[3] == str(created)
+
+
+def test_new_project_rejects_path_traversal(mocker):
+    mocker.patch("agent.tools.subprocess.run")
+    for bad in ("../evil", "a/b", "..", "", "  "):
+        result = dispatch("new_project", {"name": bad, "base": "home"})
+        assert result.startswith("error: invalid project name"), (bad, result)
+
+
+def test_new_project_rejects_unknown_base(mocker):
+    mocker.patch("agent.tools.subprocess.run")
+    result = dispatch("new_project", {"name": "site", "base": "/etc"})
+    assert result.startswith("error: invalid base")
+
+
 def test_dispatch_open_url_rejects_non_http():
     result = dispatch("open_url", {"url": "file:///etc/passwd"})
     assert result.startswith("error: invalid url")

@@ -1,6 +1,8 @@
 import re
 import os
+import pwd
 import sys
+import subprocess
 from urllib.parse import urlsplit, urlunsplit, quote, parse_qsl, urlencode
 from actions import accessibility
 from actions.applescript import run_applescript
@@ -10,6 +12,30 @@ from actions.mouse_keyboard import (
 from actions.screen import take_screenshot_with_grid, active_screen_rect, last_capture_rect
 
 _SAFE_APP_NAME = re.compile(r'^[A-Za-z0-9가-힣 ._-]+$')
+# A single folder name — no path separators or traversal. Kept deliberately
+# strict so it can be joined onto a trusted base directory without escaping.
+_SAFE_PROJECT_NAME = re.compile(r'^[A-Za-z0-9가-힣 ._-]+$')
+# Where new_project may create folders — a small whitelist of writable,
+# Finder-visible locations under the user's real home. Keyed by the lowercased
+# value the model passes; "" / "home" mean the home directory itself.
+_PROJECT_BASES = {
+    "": "", "home": "", "홈": "",
+    "desktop": "Desktop", "바탕화면": "Desktop",
+    "documents": "Documents", "문서": "Documents",
+    "downloads": "Downloads", "다운로드": "Downloads",
+}
+
+
+def _user_home() -> str:
+    """The login user's real home directory, read from the password database
+    rather than $HOME. A GUI-launched .app (Finder/DMG) can inherit an empty
+    or wrong HOME and a read-only working directory (/), which made a shelled
+    `mkdir -p ~/...` fail with "read-only directory". getpwuid is immune to
+    that — it resolves the home the same way regardless of the environment."""
+    try:
+        return pwd.getpwuid(os.getuid()).pw_dir
+    except Exception:
+        return os.path.expanduser("~")
 # Only http(s) URLs, and no characters that could break out of the quoted
 # AppleScript string ("  '  \  <  >  and whitespace).
 _SAFE_URL = re.compile(r'^https?://[^\s"\'\\<>]+$')
@@ -134,6 +160,40 @@ def dispatch(action: str, params: dict) -> str:
                 return f"error: invalid browser: {browser}"
             return run_applescript(f'tell application "{browser}" to open location "{url}"')
         return run_applescript(f'open location "{url}"')
+    elif action == "new_project":
+        # Deterministic folder-scaffold step: make a project directory under
+        # the user's real home and open it in an editor (VS Code by default,
+        # as a workspace so its integrated terminal starts in that folder).
+        # Doing this in-process — os.makedirs + `open` — instead of a shelled
+        # `mkdir -p ~/...` sidesteps the HOME/cwd fragility that made the
+        # shell path fail with "read-only directory" inside a packaged .app.
+        name = str(params.get("name", "") or "").strip()
+        if not name or name in (".", "..") or not _SAFE_PROJECT_NAME.match(name):
+            return f"error: invalid project name: {name}"
+        base_key = str(params.get("base", "") or "").strip().lower()
+        if base_key not in _PROJECT_BASES:
+            return (f"error: invalid base: {base_key} — "
+                    "use desktop/documents/downloads/home")
+        editor = str(params.get("editor", "Visual Studio Code")
+                     or "Visual Studio Code")
+        if not _SAFE_APP_NAME.match(editor):
+            return f"error: invalid editor: {editor}"
+        sub = _PROJECT_BASES[base_key]
+        base_dir = os.path.join(_user_home(), sub) if sub else _user_home()
+        path = os.path.join(base_dir, name)
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError as e:
+            return f"error: 폴더를 만들 수 없습니다: {e}"
+        try:
+            # `open -a <editor> <folder>` opens the folder as a workspace; no
+            # shell, so path spaces are safe and SafetyGuard isn't triggered.
+            subprocess.run(["open", "-a", editor, path],
+                           check=True, capture_output=True, timeout=15)
+        except Exception as e:
+            return (f"error: 폴더는 만들었지만 {editor}로 열지 못했어요 "
+                    f"({path}): {e}")
+        return f"created and opened {path} in {editor}"
     elif action == "click":
         pt = _to_logical(params)
         if pt is None:
