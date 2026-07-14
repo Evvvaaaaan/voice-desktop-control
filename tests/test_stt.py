@@ -106,7 +106,7 @@ def test_whisper_local_adapter(mocker):
     mock_model = mocker.patch("stt.whisper_local.WhisperModel")
     mock_instance = mock_model.return_value
     mock_instance.transcribe.return_value = (
-        [MagicMock(text=" 음악 틀어줘", no_speech_prob=0.05)], MagicMock()
+        [MagicMock(text=" 음악 틀어줘", no_speech_prob=0.05, avg_logprob=-0.3)], MagicMock()
     )
     adapter = WhisperLocalAdapter(model_size="base")
     result = adapter.transcribe(b"fake_audio")
@@ -135,14 +135,31 @@ def test_whisper_local_drops_low_confidence_segments(mocker):
     mock_instance = mock_model.return_value
     mock_instance.transcribe.return_value = (
         [
-            MagicMock(text="??", no_speech_prob=0.92),
-            MagicMock(text=" 음악 틀어줘", no_speech_prob=0.05),
+            MagicMock(text="??", no_speech_prob=0.92, avg_logprob=-0.3),
+            MagicMock(text=" 음악 틀어줘", no_speech_prob=0.05, avg_logprob=-0.3),
         ],
         MagicMock(),
     )
     adapter = WhisperLocalAdapter(model_size="base")
     result = adapter.transcribe(b"fake_audio")
     assert result == "음악 틀어줘"
+
+
+def test_whisper_local_drops_low_logprob_garble(mocker):
+    """Regression: unclear speech transcribed as confident-looking nonsense
+    ("혐의날 열어로서") passed the no-speech gate and made the agent open an
+    app the user never asked for. Whisper's own word confidence
+    (avg_logprob) must gate what reaches the agent."""
+    from stt.whisper_local import WhisperLocalAdapter
+    mock_model = mocker.patch("stt.whisper_local.WhisperModel")
+    mock_instance = mock_model.return_value
+    mock_instance.transcribe.return_value = (
+        [MagicMock(text=" 혐의날 열어로서", no_speech_prob=0.1, avg_logprob=-1.4)],
+        MagicMock(),
+    )
+    adapter = WhisperLocalAdapter(model_size="base")
+    result = adapter.transcribe(b"fake_audio")
+    assert result == ""
 
 
 def test_whisper_local_treats_pure_punctuation_result_as_no_speech(mocker):
@@ -153,7 +170,7 @@ def test_whisper_local_treats_pure_punctuation_result_as_no_speech(mocker):
     mock_model = mocker.patch("stt.whisper_local.WhisperModel")
     mock_instance = mock_model.return_value
     mock_instance.transcribe.return_value = (
-        [MagicMock(text="?? ??", no_speech_prob=0.3)], MagicMock()
+        [MagicMock(text="?? ??", no_speech_prob=0.3, avg_logprob=-0.3)], MagicMock()
     )
     adapter = WhisperLocalAdapter(model_size="base")
     result = adapter.transcribe(b"fake_audio")

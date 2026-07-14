@@ -10,6 +10,14 @@ from stt.base import STTBase
 # not a command — treat it the same as empty so it doesn't get searched/typed.
 _HAS_WORD_CHAR = re.compile(r"[A-Za-z0-9가-힣]")
 
+# no_speech_prob answers "was this even speech?"; avg_logprob answers "how
+# sure am I of the WORDS?". Unclear-but-real speech passes the first gate
+# and still comes out as a confident-looking mis-hearing ("혐의날 열어로서")
+# that the agent then acts on — opening some app the user never asked for.
+# Dropping segments below this floor turns those into an empty transcript,
+# which the command loop safely aborts.
+_MIN_AVG_LOGPROB = -1.0
+
 
 class WhisperLocalAdapter(STTBase):
     def __init__(self, model_size: str = "base"):
@@ -35,6 +43,8 @@ class WhisperLocalAdapter(STTBase):
                 # think this segment contains speech — drop it rather than
                 # keep whatever garbage text it emitted anyway.
                 if seg.no_speech_prob > 0.6:
+                    continue
+                if seg.avg_logprob < _MIN_AVG_LOGPROB:
                     continue
                 parts.append(seg.text)
             text = "".join(parts).strip()
