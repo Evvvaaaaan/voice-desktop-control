@@ -16,6 +16,13 @@ class HotCommandCache:
             return action
         return None
 
+    def clear(self) -> None:
+        """Drop entries AND hit counts — a cached action is the LLM's
+        interpretation of a command under the memory state it was decided
+        with, so a memory change invalidates the counts too."""
+        self._freq.clear()
+        self._cache.clear()
+
     def record(self, command: str, action: str) -> None:
         self._freq[command] += 1
         if self._freq[command] >= self.MIN_HITS_FOR_CACHE:

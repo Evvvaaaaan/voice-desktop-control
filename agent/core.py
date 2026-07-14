@@ -143,6 +143,9 @@ class Agent:
         self._listen_confirm = listen_confirm or listen_for_confirmation
         self._cache = HotCommandCache()
         self._context = ConversationContext()
+        # Fingerprint of the retriever's stable memory tiers at the time the
+        # current cache entries were recorded; None = not yet baselined.
+        self._memory_fingerprint: str | None = None
 
     def _set_state(self, state: str) -> None:
         if self._on_state:
@@ -156,6 +159,7 @@ class Agent:
 
     def set_retriever(self, retriever) -> None:
         self._retriever = retriever
+        self._memory_fingerprint = None  # re-baseline on next run
 
     def _log_action(self, command: str, action: str, params: dict,
                     dispatch_res: str) -> None:
@@ -356,6 +360,24 @@ class Agent:
             clear_target_app()
         except Exception:
             pass
+
+        # A cached action is the LLM's interpretation of a command UNDER the
+        # memory state injected at the time — if the stable memory tiers
+        # (profile/patterns) have changed since, that interpretation may no
+        # longer match what the model would decide today, so drop the cache
+        # instead of replaying it blindly forever.
+        if self._retriever is not None:
+            try:
+                fp = self._retriever.fingerprint()
+            except Exception:
+                fp = self._memory_fingerprint  # unreadable → keep cache as-is
+            if fp != self._memory_fingerprint:
+                if self._memory_fingerprint is not None:
+                    import sys
+                    print("[Agent] Memory changed — hot cache invalidated.", file=sys.stderr)
+                    trace("agent.cache.invalidated", reason="memory_changed")
+                    self._cache.clear()
+                self._memory_fingerprint = fp
 
         cached = self._cache.get(command)
         if cached:

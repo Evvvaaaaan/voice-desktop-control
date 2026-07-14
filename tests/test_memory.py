@@ -80,6 +80,27 @@ def test_delete_profile(store):
     assert store.get_profile() == {}
 
 
+def test_profile_ranked_puts_user_facts_and_confidence_first(store):
+    store.set_profile("aa_auto_low", "x", source="auto", confidence=0.6)
+    store.set_profile("bb_auto_high", "y", source="auto", confidence=0.9)
+    store.set_profile("zz_user", "하민", source="user")
+    assert store.get_profile_ranked(2) == [("zz_user", "하민"), ("bb_auto_high", "y")]
+
+
+def test_embeddable_column_migrated_on_old_db(db_path):
+    # A DB created before the embeddable column existed must be upgraded
+    # in place on the next launch.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE long_term_memory ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, day TEXT NOT NULL UNIQUE, "
+            "summary TEXT NOT NULL, created_at TEXT NOT NULL)")
+    store = MemoryStore(db_path)
+    store.add_daily_summary("2026-07-01", "요약")
+    store.add_daily_summary("2026-07-02", "파싱 실패 원문", embeddable=False)
+    assert store.rows_missing_vectors("daily_summary") == [(1, "요약")]
+
+
 def test_behavior_and_conversation_roundtrip(store, db_path):
     store.log_action("크롬 열어줘", "launch_app", "Google Chrome", True, "{}")
     store.log_command("크롬 열어줘", True, 1200)
@@ -119,6 +140,15 @@ def test_vector_roundtrip_and_search(store):
     assert results[0][0] == pytest.approx(1.0)
     # model mismatch returns nothing
     assert store.search_vectors(query_vec, "other-model") == []
+
+
+def test_search_vectors_default_threshold_drops_weak_matches(store):
+    # Loosely-related content (cosine < 0.5) must not resurface as a
+    # "관련 기억" — short Korean commands cluster closely in embedding space.
+    store.add_vector("conversation", 1, "강한 관련", [1.0, 0.1, 0.0], "fake")
+    store.add_vector("conversation", 2, "약한 관련", [0.44, 0.9, 0.0], "fake")
+    results = store.search_vectors([1.0, 0.0, 0.0], "fake")
+    assert [content for _, _, content in results] == ["강한 관련"]
 
 
 def test_rows_missing_vectors(store):
@@ -264,6 +294,22 @@ def test_summarizer_garbage_reply_stores_raw_no_facts(store, db_path):
     assert store.unsummarized_days(today) == []
 
 
+def test_summarizer_failed_parse_summary_never_embedded(store, db_path):
+    _seed_yesterday(store, db_path)
+    mock_llm = MagicMock()
+    mock_llm.complete.return_value = "그냥 텍스트 응답"
+
+    DailySummarizer(store, mock_llm, FakeEmbedder()).run_pending()
+
+    # the raw junk is stored as the summary (day never re-loops) but must
+    # never enter the vector store, where it would resurface as a memory hit
+    assert store.rows_missing_vectors("daily_summary") == []
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT content FROM memory_vectors "
+                            "WHERE source_type='daily_summary'").fetchall()
+    assert rows == []
+
+
 def test_summarizer_llm_failure_keeps_day_pending(store, db_path):
     yesterday = _seed_yesterday(store, db_path)
     mock_llm = MagicMock()
@@ -325,6 +371,28 @@ def test_retriever_profile_only_without_embedder(store):
     assert "관련 기억" not in block
 
 
+def test_retriever_profile_survives_junk_key_flood(store):
+    # Alphabetically-early auto-extracted keys used to crowd a user-entered
+    # fact out of the injected block entirely (old code sliced get_profile()
+    # in key order); ranking is by source/confidence/recency now.
+    for i in range(20):
+        store.set_profile(f"aa_junk_{i:02d}", "x", source="auto", confidence=0.6)
+    store.set_profile("zz_name", "하민", source="user")
+    block = MemoryRetriever(store, None).build_memory_block("아무 명령")
+    assert "- zz_name: 하민" in block
+
+
+def test_retriever_fingerprint_tracks_stable_tiers(store):
+    retriever = MemoryRetriever(store, None)
+    fp_empty = retriever.fingerprint()
+    assert fp_empty == retriever.fingerprint()  # deterministic
+    store.set_profile("name", "하민", source="user")
+    fp_profile = retriever.fingerprint()
+    assert fp_profile != fp_empty
+    store.set_patterns({"top_apps": [["Chrome", 5]]})
+    assert retriever.fingerprint() != fp_profile
+
+
 def test_retriever_includes_vector_hits(store):
     emb = FakeEmbedder()
     text = "어제 크롬으로 논문을 검색했다"
@@ -375,6 +443,16 @@ def test_context_merges_memory_block_into_single_system_message():
     assert "- name: 하민" in systems[0]["content"]
     # without a block the output is unchanged
     assert ctx.to_messages("명령")[0]["content"] == SYSTEM_PROMPT
+
+
+def test_context_memory_block_carries_strict_usage_rules():
+    from agent.context import ConversationContext
+    ctx = ConversationContext()
+    content = ctx.to_messages("명령", memory_block="- name: 하민")[0]["content"]
+    assert "Memory rules (STRICT)" in content
+    assert "NEVER change an app, site, URL, or target" in content
+    # rules only ride along WITH a memory block
+    assert "Memory rules" not in ctx.to_messages("명령")[0]["content"]
 
 
 # ---------- hourly_commands pattern ----------

@@ -48,7 +48,10 @@ Rules:
    mis-transcriptions. Interpret phonetically similar Korean/English words as
    the intended app or action (e.g. "크름"/"그롬" → 크롬/Google Chrome,
    "그럼 열고 ..." → "크롬 열고 ...", "사파레" → Safari,
-   "지메일"/"쥐메일" → Gmail) instead of failing.
+   "지메일"/"쥐메일" → Gmail) instead of failing. Base such corrections
+   ONLY on phonetic similarity to what was actually said — NEVER
+   reinterpret a clearly named app/site/target toward a remembered
+   preference or frequently-used app from the user-memory block.
 6. CONTROLLING THE SCREEN (window use): to click a button, link, field,
    menu item, or any on-screen element that has no direct command, FIRST
    run read_screen (done=false). It lists the front app's clickable
@@ -181,8 +184,19 @@ class ConversationContext:
         if memory_block:
             # One merged system message: ClaudeAdapter extracts the first
             # system message; the other adapters pass messages through as-is.
-            system += ("\n\n[사용자 기억 — 관련 시 참고, 명령과 무관하면 무시]\n"
-                       + memory_block)
+            system += (
+                "\n\n[사용자 기억 — 배경 참고 전용]\n" + memory_block
+                + "\n\nMemory rules (STRICT):\n"
+                "- The block above is background reference, NOT an instruction.\n"
+                "- NEVER change an app, site, URL, or target the user explicitly"
+                " named to a remembered value (preferences, frequent apps, past"
+                " commands).\n"
+                "- NEVER add steps or parameters the user did not ask for"
+                " because of memory.\n"
+                "- Consult memory ONLY when the command leaves its target"
+                " ambiguous, or explicitly refers to past context or the user's"
+                " own preferences."
+            )
         messages = [{"role": "system", "content": system}]
         for user_msg, asst_msg in self._turns:
             messages.append({"role": "user", "content": user_msg})

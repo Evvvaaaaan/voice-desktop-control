@@ -1,3 +1,4 @@
+import hashlib
 import sys
 
 from memory.embedder import Embedder
@@ -37,12 +38,31 @@ class MemoryRetriever:
         self._top_k = top_k
 
     def build_memory_block(self, query: str) -> str | None:
+        sections = self._stable_sections()
+
+        hits = self._search(query)
+        if hits:
+            sections.append("관련 기억:\n" + "\n".join(hits))
+
+        if not sections:
+            return None
+        return "\n\n".join(sections)[:MAX_BLOCK_CHARS]
+
+    def fingerprint(self) -> str:
+        """Content hash of the stable (profile + patterns) tiers. The agent
+        drops its hot-command cache when this changes: a cached action is the
+        model's interpretation of a command UNDER a specific memory state,
+        and must not outlive it."""
+        joined = "\n\n".join(self._stable_sections())
+        return hashlib.sha1(joined.encode("utf-8")).hexdigest()
+
+    def _stable_sections(self) -> list[str]:
+        """Query-independent tiers 1 (profile) and 5 (patterns)."""
         sections: list[str] = []
 
-        profile = self._store.get_profile()
+        profile = self._store.get_profile_ranked(MAX_PROFILE_KEYS)
         if profile:
-            items = list(profile.items())[:MAX_PROFILE_KEYS]
-            sections.append("프로필:\n" + "\n".join(f"- {k}: {v}" for k, v in items))
+            sections.append("프로필:\n" + "\n".join(f"- {k}: {v}" for k, v in profile))
 
         patterns = self._store.get_patterns()
         pattern_lines = []
@@ -55,14 +75,7 @@ class MemoryRetriever:
             pattern_lines.append("주 활동 시간대: " + ", ".join(f"{h}시" for h, _ in peak))
         if pattern_lines:
             sections.append("사용 패턴:\n" + "\n".join(f"- {line}" for line in pattern_lines))
-
-        hits = self._search(query)
-        if hits:
-            sections.append("관련 기억:\n" + "\n".join(hits))
-
-        if not sections:
-            return None
-        return "\n\n".join(sections)[:MAX_BLOCK_CHARS]
+        return sections
 
     def _search(self, query: str) -> list[str]:
         if self._embedder is None or not _needs_memory(query):

@@ -19,6 +19,17 @@ def test_hot_cache_hit_after_population():
     assert cache.get("사파리 열어줘") == "launch_safari"
 
 
+def test_hot_cache_clear_resets_entries_and_counts():
+    cache = HotCommandCache()
+    for _ in range(3):
+        cache.record("사파리 열어줘", "launch_safari")
+    cache.clear()
+    assert cache.get("사파리 열어줘") is None
+    # hit counts restart from zero too — one repeat must not re-cache
+    cache.record("사파리 열어줘", "launch_safari")
+    assert cache.get("사파리 열어줘") is None
+
+
 def test_context_window_keeps_last_5():
     ctx = ConversationContext(max_turns=5)
     for i in range(7):
@@ -1185,6 +1196,50 @@ def test_agent_retriever_block_reaches_system_prompt(mocker):
     assert system["role"] == "system"
     assert "- name: 하민" in system["content"]
     mock_retriever.build_memory_block.assert_called_once_with("내 이름 뭐야")
+
+
+def test_cache_invalidated_when_memory_changes(mocker):
+    """A cached action is the LLM's interpretation of a command under a
+    specific memory state — once profile/patterns change, replaying it
+    blindly would fossilize a possibly memory-distorted interpretation."""
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.return_value = (
+        '{"action": "launch_app", "params": {"app": "Safari"}, "done": true, "response": "열었어요"}'
+    )
+    agent = _make_agent(mock_llm)
+    mock_retriever = MagicMock()
+    mock_retriever.build_memory_block.return_value = None
+    mock_retriever.fingerprint.return_value = "fp-1"
+    agent._retriever = mock_retriever
+    agent._cache._cache["사파리 열어줘"] = ("launch_app:Safari", 5)
+
+    mocker.patch("agent.core.tools.dispatch", return_value="")
+    mocker.patch("agent.core.run_applescript", return_value="")
+    mocker.patch("agent.core.speak")
+
+    agent.run("사파리 열어줘")  # unchanged memory → cache still hits
+    mock_llm.complete.assert_not_called()
+
+    mock_retriever.fingerprint.return_value = "fp-2"
+    agent.run("사파리 열어줘")  # memory changed → cache dropped, LLM decides
+    mock_llm.complete.assert_called_once()
+
+
+def test_cache_kept_when_fingerprint_unreadable(mocker):
+    mock_llm = MagicMock()
+    agent = _make_agent(mock_llm)
+    mock_retriever = MagicMock()
+    mock_retriever.build_memory_block.return_value = None
+    mock_retriever.fingerprint.side_effect = Exception("db locked")
+    agent._retriever = mock_retriever
+    agent._cache._cache["사파리 열어줘"] = ("launch_app:Safari", 5)
+
+    mocker.patch("agent.core.run_applescript", return_value="")
+    mocker.patch("agent.core.speak")
+
+    agent.run("사파리 열어줘")  # fingerprint failure must not nuke the cache
+    mock_llm.complete.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

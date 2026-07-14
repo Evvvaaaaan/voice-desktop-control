@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS long_term_memory (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     day TEXT NOT NULL UNIQUE,
     summary TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    embeddable INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS memory_vectors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,6 +90,11 @@ class MemoryStore:
         with self._conn() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(_DDL)
+            try:
+                conn.execute("ALTER TABLE long_term_memory "
+                             "ADD COLUMN embeddable INTEGER NOT NULL DEFAULT 1")
+            except sqlite3.OperationalError:
+                pass  # column already exists (fresh DDL or migrated earlier)
 
     def _conn(self) -> sqlite3.Connection:
         return sqlite3.connect(self._db_path)
@@ -112,6 +118,18 @@ class MemoryStore:
         with self._conn() as conn:
             rows = conn.execute("SELECT key, value FROM user_profile ORDER BY key").fetchall()
         return dict(rows)
+
+    def get_profile_ranked(self, limit: int) -> list[tuple[str, str]]:
+        """Top profile rows for prompt injection: user-entered facts first,
+        then by confidence, then recency — NOT alphabetical, so accumulated
+        low-value auto-extracted keys can't crowd out the facts that matter."""
+        with self._conn() as conn:
+            return conn.execute(
+                "SELECT key, value FROM user_profile "
+                "ORDER BY (source='user') DESC, confidence DESC, updated_at DESC "
+                "LIMIT ?",
+                (limit,),
+            ).fetchall()
 
     def get_profile_sources(self) -> dict[str, str]:
         with self._conn() as conn:
@@ -150,12 +168,18 @@ class MemoryStore:
 
     # ----- tier 3: long-term memory -----
 
-    def add_daily_summary(self, day: str, summary: str) -> int:
+    def add_daily_summary(self, day: str, summary: str,
+                          embeddable: bool = True) -> int:
+        """embeddable=False stores the day (so it never re-loops) while
+        keeping its text out of vector search — used for raw LLM replies
+        that failed summary parsing."""
         with self._conn() as conn:
             cur = conn.execute(
-                """INSERT INTO long_term_memory VALUES (NULL,?,?,?)
-                   ON CONFLICT(day) DO UPDATE SET summary=excluded.summary""",
-                (day, summary, _now()),
+                """INSERT INTO long_term_memory (day, summary, created_at, embeddable)
+                   VALUES (?,?,?,?)
+                   ON CONFLICT(day) DO UPDATE SET summary=excluded.summary,
+                     embeddable=excluded.embeddable""",
+                (day, summary, _now(), int(embeddable)),
             )
             return cur.lastrowid
 
@@ -203,8 +227,12 @@ class MemoryStore:
                 (source_type, source_id, content, blob, len(embedding), model, _now()),
             )
 
+    # Short Korean commands cluster closely in embedding space, so a loose
+    # threshold matches nearly every stored memory and the LLM starts pulling
+    # params out of unrelated past commands. 0.5 keeps only genuinely related
+    # content.
     def search_vectors(self, query_vec: list[float], model: str,
-                       top_k: int = 3, min_sim: float = 0.25
+                       top_k: int = 3, min_sim: float = 0.5
                        ) -> list[tuple[float, str, str]]:
         """Top-k cosine matches as (similarity, source_type, content)."""
         with self._conn() as conn:
@@ -240,12 +268,15 @@ class MemoryStore:
             return []
         content_expr = ("user_text || ' / ' || assistant_text"
                         if source_type == "conversation" else "summary")
+        embeddable_filter = (" AND t.embeddable=1"
+                             if source_type == "daily_summary" else "")
         with self._conn() as conn:
             return conn.execute(
                 f"""SELECT t.id, {content_expr} FROM {table[source_type]} t
                     WHERE t.id NOT IN (
                       SELECT source_id FROM memory_vectors
                       WHERE source_type=? AND source_id IS NOT NULL)
+                      {embeddable_filter}
                     ORDER BY t.id LIMIT ?""",
                 (source_type, limit),
             ).fetchall()

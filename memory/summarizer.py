@@ -106,8 +106,8 @@ class DailySummarizer:
             {"role": "user", "content": "\n".join(lines)},
         ])
 
-        summary, facts = self._parse(raw)
-        self._store.add_daily_summary(day, summary)
+        summary, facts, parsed_ok = self._parse(raw)
+        self._store.add_daily_summary(day, summary, embeddable=parsed_ok)
         for fact in facts:
             try:
                 key, value = str(fact["key"]).strip(), str(fact["value"]).strip()
@@ -118,9 +118,11 @@ class DailySummarizer:
                 self._store.set_profile(key, value, source="auto", confidence=confidence)
 
     @staticmethod
-    def _parse(raw: str) -> tuple[str, list[dict]]:
-        """Extract (summary, profile_facts) from the LLM reply. On parse
-        failure the raw text becomes the summary so the day never re-loops."""
+    def _parse(raw: str) -> tuple[str, list[dict], bool]:
+        """Extract (summary, profile_facts, parsed_ok) from the LLM reply.
+        On parse failure the raw text becomes the summary so the day never
+        re-loops, but parsed_ok=False keeps that junk out of the vector
+        store — otherwise it resurfaces later as a retrieved '관련 기억'."""
         cleaned = _strip_think(raw).strip()
         match = _JSON_RE.search(cleaned)
         if match:
@@ -129,10 +131,10 @@ class DailySummarizer:
                 summary = str(data.get("summary", "")).strip()
                 facts = data.get("profile_facts", [])
                 if summary:
-                    return summary, facts if isinstance(facts, list) else []
+                    return summary, facts if isinstance(facts, list) else [], True
             except (json.JSONDecodeError, ValueError, TypeError):
                 pass
-        return cleaned or "(요약 실패)", []
+        return cleaned or "(요약 실패)", [], False
 
     def embed_backlog(self) -> None:
         """Embed conversation/summary rows that have no vector yet. A day
