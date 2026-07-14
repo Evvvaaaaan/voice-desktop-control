@@ -408,9 +408,6 @@ def _patch_ax(monkeypatch, window, trusted=True, app_name="TestApp"):
     monkeypatch.setattr(ax, "_ax_app", lambda pid: {"AXWindows": [window]})
     monkeypatch.setattr(ax, "_ax_attr", lambda elem, name: elem.get(name))
     monkeypatch.setattr(ax, "_ax_center", lambda elem: elem.get("center"))
-    monkeypatch.setattr(ax, "_ax_actions", lambda elem: elem.get("actions", []))
-    monkeypatch.setattr(ax, "_ax_perform",
-                        lambda elem, action: elem.get("perform_ok", True))
     monkeypatch.setattr(ax, "_ax_settable",
                         lambda elem, name: elem.get("settable", False))
     monkeypatch.setattr(
@@ -499,44 +496,7 @@ def test_element_center_none_when_element_gone(monkeypatch):
     assert element_center(1) is None
 
 
-# ---------- independent actuation (AXPress / AXSetValue / target pinning) ----------
-
-def test_press_element_uses_ax_action(monkeypatch):
-    from actions.accessibility import snapshot_screen, press_element
-    window, btn, _ = _fake_tree()
-    btn["actions"] = ["AXPress"]
-    _patch_ax(monkeypatch, window)
-    snapshot_screen()
-    assert press_element(1) == "pressed element 1 (AXPress)"
-
-
-def test_press_element_none_without_ax_action(monkeypatch):
-    from actions.accessibility import snapshot_screen, press_element
-    window, btn, _ = _fake_tree()
-    btn["actions"] = []
-    _patch_ax(monkeypatch, window)
-    snapshot_screen()
-    assert press_element(1) is None
-
-
-def test_press_element_double_prefers_axopen(monkeypatch):
-    from actions.accessibility import snapshot_screen, press_element
-    window, btn, _ = _fake_tree()
-    btn["actions"] = ["AXPress", "AXOpen"]
-    _patch_ax(monkeypatch, window)
-    snapshot_screen()
-    assert press_element(1, double=True) == "pressed element 1 (AXOpen)"
-
-
-def test_press_element_none_when_perform_fails(monkeypatch):
-    from actions.accessibility import snapshot_screen, press_element
-    window, btn, _ = _fake_tree()
-    btn["actions"] = ["AXPress"]
-    btn["perform_ok"] = False
-    _patch_ax(monkeypatch, window)
-    snapshot_screen()
-    assert press_element(1) is None
-
+# ---------- independent actuation (AXSetValue / target pinning) ----------
 
 def test_set_element_value_success(monkeypatch):
     from actions.accessibility import snapshot_screen, set_element_value

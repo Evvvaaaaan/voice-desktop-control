@@ -184,17 +184,6 @@ def element_center(element_id: int):
     return _ax_center(elem)
 
 
-def _ax_actions(elem) -> list:
-    import ApplicationServices as AS
-    err, actions = AS.AXUIElementCopyActionNames(elem, None)
-    return list(actions or []) if err == 0 else []
-
-
-def _ax_perform(elem, action) -> bool:
-    import ApplicationServices as AS
-    return AS.AXUIElementPerformAction(elem, action) == 0
-
-
 def _ax_settable(elem, name) -> bool:
     import ApplicationServices as AS
     err, settable = AS.AXUIElementIsAttributeSettable(elem, name, None)
@@ -273,26 +262,6 @@ def activate_target_app() -> bool:
         return False
     time.sleep(_ACTIVATE_SETTLE_SEC)
     return True
-
-
-def press_element(element_id: int, double: bool = False):
-    """Actuate a snapshotted element via its AX action — no cursor movement,
-    works while the app is in the background. Returns the result string, or
-    None when the element exposes no usable action (caller falls back to a
-    real mouse click)."""
-    elem = _SNAPSHOT.get(element_id)
-    if elem is None:
-        return None
-    names = _ax_actions(elem)
-    if double and "AXOpen" in names:
-        action = "AXOpen"
-    elif "AXPress" in names:
-        action = "AXPress"
-    else:
-        return None
-    if not _ax_perform(elem, action):
-        return None
-    return f"pressed element {element_id} ({action})"
 
 
 def set_element_value(element_id: int, text: str) -> str:

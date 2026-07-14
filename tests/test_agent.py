@@ -1143,24 +1143,26 @@ def test_dispatch_read_screen_returns_listing(mocker):
     assert '[1] 버튼 "확인"' in res
 
 
-def test_dispatch_click_element_falls_back_to_mouse(mocker):
+def test_dispatch_click_element_clicks_with_mouse(mocker):
     mocker.patch("actions.accessibility.element_known", return_value=True)
-    mocker.patch("actions.accessibility.press_element", return_value=None)
+    mock_activate = mocker.patch(
+        "actions.accessibility.activate_target_app", return_value=True)
     mocker.patch("actions.accessibility.element_center", return_value=(120.0, 240.0))
     mock_click = mocker.patch("agent.tools.click")
     res = dispatch("click_element", {"id": 2})
+    mock_activate.assert_called_once()
     mock_click.assert_called_once_with(120, 240)
-    assert res == "clicked element 2 at 120,240 (mouse fallback)"
+    assert res == "clicked element 2 at 120,240"
 
 
-def test_dispatch_click_element_double_falls_back_to_mouse(mocker):
+def test_dispatch_click_element_double_clicks_with_mouse(mocker):
     mocker.patch("actions.accessibility.element_known", return_value=True)
-    mocker.patch("actions.accessibility.press_element", return_value=None)
+    mocker.patch("actions.accessibility.activate_target_app", return_value=True)
     mocker.patch("actions.accessibility.element_center", return_value=(10.0, 20.0))
     mock_double = mocker.patch("agent.tools.double_click")
     res = dispatch("click_element", {"id": 1, "double": True})
     mock_double.assert_called_once_with(10, 20)
-    assert res == "double_clicked element 1 at 10,20 (mouse fallback)"
+    assert res == "double_clicked element 1 at 10,20"
 
 
 def test_dispatch_click_element_unknown_id(mocker):
@@ -1171,7 +1173,7 @@ def test_dispatch_click_element_unknown_id(mocker):
 
 def test_dispatch_click_element_stale_element(mocker):
     mocker.patch("actions.accessibility.element_known", return_value=True)
-    mocker.patch("actions.accessibility.press_element", return_value=None)
+    mocker.patch("actions.accessibility.activate_target_app", return_value=True)
     mocker.patch("actions.accessibility.element_center", return_value=None)
     res = dispatch("click_element", {"id": 3})
     assert res.startswith("error: 요소 3")
@@ -1272,16 +1274,6 @@ def test_system_prompt_documents_window_use():
 
 
 # ---------- independent actuation dispatch ----------
-
-def test_dispatch_click_element_prefers_ax_press(mocker):
-    mocker.patch("actions.accessibility.element_known", return_value=True)
-    mocker.patch("actions.accessibility.press_element",
-                 return_value="pressed element 2 (AXPress)")
-    mock_click = mocker.patch("agent.tools.click")
-    res = dispatch("click_element", {"id": 2})
-    assert res == "pressed element 2 (AXPress)"
-    mock_click.assert_not_called()
-
 
 def test_dispatch_set_value(mocker):
     mock_set = mocker.patch("actions.accessibility.set_element_value",

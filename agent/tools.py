@@ -170,11 +170,12 @@ def dispatch(action: str, params: dict) -> str:
         if not accessibility.element_known(element_id):
             return (f"error: 알 수 없는 요소 id {element_id} — "
                     "read_screen을 먼저 실행하세요")
-        pressed = accessibility.press_element(element_id, bool(params.get("double")))
-        if pressed is not None:
-            return pressed
-        # No usable AX action — real mouse click is the one element path
-        # that still interferes with the user's pointer.
+        # A real mouse click lands on the topmost window at the point, so
+        # the target app must be frontmost before the glide starts.
+        try:
+            accessibility.activate_target_app()
+        except Exception:
+            pass
         center = accessibility.element_center(element_id)
         if center is None:
             return (f"error: 요소 {element_id}가 더 이상 존재하지 않아요 — "
@@ -182,9 +183,9 @@ def dispatch(action: str, params: dict) -> str:
         x, y = int(center[0]), int(center[1])
         if params.get("double"):
             double_click(x, y)
-            return f"double_clicked element {element_id} at {x},{y} (mouse fallback)"
+            return f"double_clicked element {element_id} at {x},{y}"
         click(x, y)
-        return f"clicked element {element_id} at {x},{y} (mouse fallback)"
+        return f"clicked element {element_id} at {x},{y}"
     elif action == "set_value":
         try:
             element_id = int(params.get("id"))
