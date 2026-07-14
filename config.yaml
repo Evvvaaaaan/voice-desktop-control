@@ -1,5 +1,5 @@
 activation:
-  continuous: true
+  continuous: false
   hotkey: true
   hotkey_binding: alt+space
   wake_phrase: hey desk

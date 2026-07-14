@@ -30,7 +30,10 @@ class ActivationConfig:
     wake_phrase: str = "hey desk"
     hotkey: bool = True
     hotkey_binding: str = "alt+space"
-    continuous: bool = True   # auto re-listen after a successful command
+    # Auto re-listen after a successful command — OFF by default: the follow-up
+    # window records with no wake word, so ambient conversation/noise near the
+    # mic gets transcribed and EXECUTED as a command the user never gave.
+    continuous: bool = False
     wake_vad_speech_amp: int = 500     # int16 mic amplitude that counts as speech
     wake_vad_silence_frames: int = 5   # consecutive silent frames (~80ms each) that end an utterance
 
