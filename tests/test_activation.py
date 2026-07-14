@@ -130,6 +130,32 @@ def test_pause_sets_flag_and_returns_when_no_stream_open():
     assert not listener._pause_requested.is_set()
 
 
+def test_stop_pauses_stream_and_joins_listener_thread():
+    class FakeThread:
+        def __init__(self):
+            self.join_timeout = None
+            self._alive = True
+
+        def is_alive(self):
+            return self._alive
+
+        def join(self, timeout=None):
+            self.join_timeout = timeout
+            self._alive = False
+
+    listener = WakeWordListener("hey desk", lambda: None)
+    thread = FakeThread()
+    listener._thread = thread
+    listener._stream_closed.set()
+
+    listener.stop(timeout=0.2)
+
+    assert listener._running is False
+    assert listener._pause_requested.is_set()
+    assert thread.join_timeout == 0.2
+    assert listener._thread is None
+
+
 def test_module_helpers_control_active_listener():
     from activation.wake_word import (
         set_active_listener, pause_listening, resume_listening,

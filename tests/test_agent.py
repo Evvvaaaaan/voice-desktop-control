@@ -223,6 +223,79 @@ def test_new_project_rejects_unknown_base(mocker):
     assert result.startswith("error: invalid base")
 
 
+def _fake_claude_bin(tmp_path, mocker):
+    """Point run_claude at an existing stub binary so its presence check passes."""
+    stub = tmp_path / "claude"
+    stub.write_text("#!/bin/sh\n")
+    mocker.patch("agent.tools.shutil.which", return_value=str(stub))
+    return stub
+
+
+def test_run_claude_creates_files_and_reports(mocker, tmp_path):
+    """Success is only reported when Claude actually produced files — the
+    verification the blind type_text/press_key path could not do."""
+    from types import SimpleNamespace
+    from pathlib import Path
+    proj = tmp_path / "Desktop" / "lotion-site"
+    proj.mkdir(parents=True)
+    mocker.patch("agent.tools._user_home", return_value=str(tmp_path))
+    _fake_claude_bin(tmp_path, mocker)
+
+    def fake_run(cmd, cwd=None, **kw):
+        (Path(cwd) / "index.html").write_text("<html>")  # claude writes a file
+        return SimpleNamespace(returncode=0, stdout="done", stderr="")
+
+    mocker.patch("agent.tools.subprocess.run", side_effect=fake_run)
+    result = dispatch("run_claude",
+                      {"name": "lotion-site", "base": "desktop", "prompt": "만들어줘"})
+    assert result.startswith("created files")
+    assert "index.html" in result
+
+
+def test_run_claude_reports_error_when_no_files_created(mocker, tmp_path):
+    """Claude exits 0 but writes nothing → this must be an error, not success,
+    so the agent's done=true gate rejects it and reports honestly."""
+    from types import SimpleNamespace
+    proj = tmp_path / "Desktop" / "site"
+    proj.mkdir(parents=True)
+    mocker.patch("agent.tools._user_home", return_value=str(tmp_path))
+    _fake_claude_bin(tmp_path, mocker)
+    mocker.patch("agent.tools.subprocess.run",
+                 return_value=SimpleNamespace(returncode=0, stdout="", stderr=""))
+    result = dispatch("run_claude",
+                      {"name": "site", "base": "desktop", "prompt": "만들어줘"})
+    assert result.startswith("error")
+
+
+def test_run_claude_reports_error_on_nonzero_exit(mocker, tmp_path):
+    from types import SimpleNamespace
+    (tmp_path / "Desktop" / "site").mkdir(parents=True)
+    mocker.patch("agent.tools._user_home", return_value=str(tmp_path))
+    _fake_claude_bin(tmp_path, mocker)
+    mocker.patch("agent.tools.subprocess.run",
+                 return_value=SimpleNamespace(returncode=1, stdout="", stderr="boom"))
+    result = dispatch("run_claude",
+                      {"name": "site", "base": "desktop", "prompt": "x"})
+    assert result.startswith("error") and "boom" in result
+
+
+def test_run_claude_requires_existing_project_folder(mocker, tmp_path):
+    mocker.patch("agent.tools._user_home", return_value=str(tmp_path))
+    _fake_claude_bin(tmp_path, mocker)
+    mock_run = mocker.patch("agent.tools.subprocess.run")
+    result = dispatch("run_claude",
+                      {"name": "missing", "base": "desktop", "prompt": "x"})
+    assert result.startswith("error") and "폴더가 없어요" in result
+    mock_run.assert_not_called()  # never launch claude without a target folder
+
+
+def test_run_claude_requires_prompt(mocker, tmp_path):
+    mock_run = mocker.patch("agent.tools.subprocess.run")
+    result = dispatch("run_claude", {"name": "site", "base": "desktop"})
+    assert result.startswith("error: run_claude requires param prompt")
+    mock_run.assert_not_called()
+
+
 def test_dispatch_open_url_rejects_non_http():
     result = dispatch("open_url", {"url": "file:///etc/passwd"})
     assert result.startswith("error: invalid url")

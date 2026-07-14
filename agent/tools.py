@@ -2,6 +2,7 @@ import re
 import os
 import pwd
 import sys
+import shutil
 import subprocess
 from urllib.parse import urlsplit, urlunsplit, quote, parse_qsl, urlencode
 from actions import accessibility
@@ -36,6 +37,15 @@ def _user_home() -> str:
         return pwd.getpwuid(os.getuid()).pw_dir
     except Exception:
         return os.path.expanduser("~")
+
+
+def _project_path(name: str, base_key: str) -> str:
+    """Absolute path of a project folder, from a validated name + base key.
+    Shared by new_project (which creates it) and run_claude (which runs inside
+    it) so the two resolve to the exact same directory for the same params."""
+    sub = _PROJECT_BASES[base_key]
+    base_dir = os.path.join(_user_home(), sub) if sub else _user_home()
+    return os.path.join(base_dir, name)
 # Only http(s) URLs, and no characters that could break out of the quoted
 # AppleScript string ("  '  \  <  >  and whitespace).
 _SAFE_URL = re.compile(r'^https?://[^\s"\'\\<>]+$')
@@ -178,9 +188,7 @@ def dispatch(action: str, params: dict) -> str:
                      or "Visual Studio Code")
         if not _SAFE_APP_NAME.match(editor):
             return f"error: invalid editor: {editor}"
-        sub = _PROJECT_BASES[base_key]
-        base_dir = os.path.join(_user_home(), sub) if sub else _user_home()
-        path = os.path.join(base_dir, name)
+        path = _project_path(name, base_key)
         try:
             os.makedirs(path, exist_ok=True)
         except OSError as e:
@@ -194,6 +202,51 @@ def dispatch(action: str, params: dict) -> str:
             return (f"error: 폴더는 만들었지만 {editor}로 열지 못했어요 "
                     f"({path}): {e}")
         return f"created and opened {path} in {editor}"
+    elif action == "run_claude":
+        # Run Claude Code headlessly (`claude -p`) in a project folder instead
+        # of typing a prompt into an interactive terminal blind. This is
+        # deterministic: it produces files and exits, and we VERIFY the real
+        # outcome (exit code + newly created files) so a failure can't be
+        # reported as success — the honest-completion gate the blind
+        # type_text/press_key path could not provide.
+        prompt = str(params.get("prompt", "") or "").strip()
+        if not prompt:
+            return "error: run_claude requires param prompt"
+        name = str(params.get("name", "") or "").strip()
+        if not name or name in (".", "..") or not _SAFE_PROJECT_NAME.match(name):
+            return f"error: invalid project name: {name}"
+        base_key = str(params.get("base", "desktop") or "desktop").strip().lower()
+        if base_key not in _PROJECT_BASES:
+            return (f"error: invalid base: {base_key} — "
+                    "use desktop/documents/downloads/home")
+        path = _project_path(name, base_key)
+        if not os.path.isdir(path):
+            return (f"error: 프로젝트 폴더가 없어요 ({path}) — "
+                    "먼저 new_project로 폴더를 만드세요")
+        claude_bin = shutil.which("claude") or os.path.join(
+            _user_home(), ".local", "bin", "claude")
+        if not os.path.exists(claude_bin):
+            return ("error: claude CLI를 찾을 수 없어요 — "
+                    "Claude Code가 설치되어 있는지 확인하세요")
+        before = set(os.listdir(path))
+        try:
+            proc = subprocess.run(
+                [claude_bin, "-p", prompt,
+                 "--permission-mode", "bypassPermissions"],
+                cwd=path, capture_output=True, text=True, timeout=600,
+            )
+        except subprocess.TimeoutExpired:
+            return "error: Claude 실행이 10분을 넘겨 중단했어요"
+        except Exception as e:
+            return f"error: Claude 실행 실패: {e}"
+        new_files = sorted(set(os.listdir(path)) - before)
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or "").strip()[-300:]
+            return f"error: Claude 실행이 실패했어요 (code {proc.returncode}): {tail}"
+        if not new_files:
+            return ("error: Claude가 실행됐지만 새 파일이 생기지 않았어요 — "
+                    "요청을 더 구체적으로 다시 시도하세요")
+        return f"created files [{', '.join(new_files)}] in {path}"
     elif action == "click":
         pt = _to_logical(params)
         if pt is None:

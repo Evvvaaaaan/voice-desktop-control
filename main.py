@@ -361,6 +361,9 @@ def main():
     if memory_store:
         DailySummarizer(memory_store, llm, embedder).start_background()
 
+    hotkey = None
+    wakeword = None
+
     def _try_begin_session() -> bool:
         return _COMMAND_LOCK.acquire(blocking=False)
 
@@ -459,7 +462,15 @@ def main():
         set_active_listener(wakeword)
 
     app = VoiceDeskMenuBar(agent, hud, settings_window, on_activation_callback=on_activation)
-    app.run()
+    try:
+        app.run()
+    finally:
+        set_active_listener(None)
+        if wakeword is not None:
+            wakeword.stop()
+        if hotkey is not None:
+            hotkey.stop()
+        hud.stop()
 
 
 if __name__ == "__main__":

@@ -578,6 +578,20 @@ class TestOrchestratorWiring:
         main()
         mocks["wakeword"].assert_not_called()
 
+    def test_shutdown_stops_background_listeners_and_hud(self, mocker, tmp_path):
+        mocks = self._patch_all(mocker, tmp_path)
+        mocks["config"].activation.hotkey = True
+        mocks["config"].activation.wake_word = True
+        mocks["menubar"].return_value.run.side_effect = KeyboardInterrupt
+        from main import main
+
+        with pytest.raises(KeyboardInterrupt):
+            main()
+
+        mocks["wakeword"].return_value.stop.assert_called_once()
+        mocks["hotkey"].return_value.stop.assert_called_once()
+        mocks["hud"].return_value.stop.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # Config hot-reload

@@ -129,12 +129,23 @@ class WakeWordListener:
         return True
 
     def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
         self._running = True
+        self._pause_requested.clear()
         self._thread = threading.Thread(target=self._listen_loop, daemon=True)
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 3.0) -> None:
         self._running = False
+        with self._stream_lock:
+            self._pause_requested.set()
+        self._stream_closed.wait(timeout)
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=timeout)
+            if not thread.is_alive():
+                self._thread = None
 
     def pause(self, timeout: float = 3.0) -> None:
         """Close the mic stream and wait until it is actually closed.
