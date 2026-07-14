@@ -14,7 +14,7 @@ from actions.tts import speak
 from actions.applescript import run_applescript
 from actions.screen import take_screenshot_with_grid
 from stt.confirm import listen_for_confirmation, parse_yes_no
-from actions.accessibility import snapshot_screen, clear_target_app
+from actions.accessibility import snapshot_screen, clear_target_app, release_ax_flags
 from diagnostics import trace
 
 # Computer-use tasks need room to screenshot → click → verify → correct.
@@ -42,6 +42,16 @@ _UNCACHEABLE_ACTIONS = {"speak_only", "read_screen", "click_element", "set_value
 # Let the UI react (menu open, page transition) before re-reading elements.
 _ELEMENT_SETTLE_SEC = 0.4
 
+# Marks where an element listing starts inside an observation message. Only
+# the LATEST listing is valid (ids die on every new snapshot), so when a new
+# one arrives the previous message's listing is cut at this marker — keeping
+# it would both bloat the prompt (up to ~150 lines per listing, resent to the
+# LLM on every remaining iteration) and tempt the model into stale ids.
+_ELEMENTS_MARKER = "현재 화면 요소:"
+_STALE_ELEMENTS_NOTE = (
+    _ELEMENTS_MARKER + " (화면이 바뀌어 이 목록은 무효화되었습니다 — 최신 목록만 사용하세요)"
+)
+
 # After launch_app / open_url the new window needs a moment to appear and
 # update its title. Without this the observation grabs the PREVIOUS app's
 # window title and the LLM doesn't realise the action already took effect.
@@ -58,6 +68,19 @@ def _dispatch_failed(result) -> bool:
     return isinstance(result, str) and (
         result.startswith("error") or result == "routine_failed"
     )
+
+
+def _mark_stale_elements(messages: list[dict], idx: int | None) -> None:
+    """Cut the element listing out of an older observation once a newer one
+    exists — its ids are unclickable by design, and every kept listing is
+    re-sent to the LLM on each remaining iteration."""
+    if idx is None:
+        return
+    content = messages[idx].get("content")
+    if isinstance(content, str) and _ELEMENTS_MARKER in content:
+        messages[idx]["content"] = (
+            content.split(_ELEMENTS_MARKER, 1)[0] + _STALE_ELEMENTS_NOTE
+        )
 
 
 def _strip_think(raw: str) -> str:
@@ -164,6 +187,17 @@ class Agent:
             print(f"[Memory] log_outcome failed: {e}", file=sys.stderr)
 
     @staticmethod
+    def _brief_result(res: str, limit: int = 80) -> str:
+        """First line only, capped: a read_screen result is a full element
+        listing (up to ~150 lines), and the step summary is re-sent inside
+        EVERY later observation — repeating whole listings there multiplies
+        the prompt size each iteration until the LLM context overflows."""
+        first, _, rest = str(res).partition("\n")
+        if len(first) > limit:
+            first = first[:limit] + "…"
+        return first + (f" (외 {rest.count(chr(10)) + 1}줄)" if rest else "")
+
+    @staticmethod
     def _step_summary(step_history: list[tuple[str, dict, str]]) -> str:
         """One-line-per-step summary so the LLM can see what it already did."""
         if not step_history:
@@ -171,7 +205,7 @@ class Agent:
         lines = ["지금까지 수행한 단계:"]
         for idx, (act, prm, res) in enumerate(step_history, 1):
             brief = ", ".join(f"{k}={v!r}" for k, v in prm.items()) if prm else ""
-            lines.append(f"  {idx}. {act}({brief}) → {res}")
+            lines.append(f"  {idx}. {act}({brief}) → {Agent._brief_result(res)}")
         return "\n".join(lines)
 
     def _observe(self, action: str, dispatch_res: str,
@@ -201,8 +235,16 @@ class Agent:
             except Exception:
                 pass
 
+        # A successful read_screen's listing goes under _ELEMENTS_MARKER (so
+        # it can be pruned once superseded), not inline in the result line.
+        elements = None
+        result_text = dispatch_res
+        if action == "read_screen" and not _dispatch_failed(dispatch_res):
+            elements = dispatch_res
+            result_text = "요소 목록을 읽었습니다"
+
         parts = [
-            f"관찰: 직전 동작 '{action}'의 결과는 '{dispatch_res}'입니다.",
+            f"관찰: 직전 동작 '{action}'의 결과는 '{result_text}'입니다.",
             f"현재 활성 앱: {front or '알 수 없음'}"
             + (f" — 창 제목: \"{win_title}\"" if win_title else "") + ".",
         ]
@@ -215,12 +257,14 @@ class Agent:
         text = "\n".join(parts)
 
         if action in ("read_screen", "click_element", "set_value"):
-            # Window-use observations are text: read_screen's listing is
-            # already in dispatch_res, and after a click/set we re-read the
-            # elements so the model verifies the result without a screenshot.
+            # Window-use observations are text: after a click/set we re-read
+            # the elements so the model verifies the result without a
+            # screenshot.
             if action != "read_screen" and not _dispatch_failed(dispatch_res):
                 time.sleep(_ELEMENT_SETTLE_SEC)
-                text += "\n현재 화면 요소:\n" + snapshot_screen()
+                elements = snapshot_screen()
+            if elements is not None:
+                text += "\n" + _ELEMENTS_MARKER + "\n" + elements
             return {"role": "user", "content": text}
         if (
             getattr(self._llm, "supports_vision", False) is True
@@ -278,6 +322,19 @@ class Agent:
         return final_response
 
     def run(self, command: str) -> str:
+        try:
+            return self._run(command)
+        finally:
+            # read_screen turns assistive-tech mode ON for the target app;
+            # Chromium/Electron apps burn renderer CPU/memory for as long as
+            # it stays on, so it must go back OFF however the command ends
+            # (done, exhausted, safety-blocked, or an exception mid-loop).
+            try:
+                release_ax_flags()
+            except Exception:
+                pass
+
+    def _run(self, command: str) -> str:
         start = time.monotonic()
         retry = 0
         trace(
@@ -353,6 +410,9 @@ class Agent:
         # Track the previous step's (action, params) to detect identical
         # consecutive actions and nudge the model forward.
         prev_action_key: tuple[str, str] | None = None
+        # Index in `messages` of the observation holding the LATEST element
+        # listing, so it can be cut down once a newer listing supersedes it.
+        last_elements_idx: int | None = None
         # Maintain one running message list so each step remembers the original
         # command and the assistant's prior actions/observations.
         memory_block = None
@@ -554,8 +614,13 @@ class Agent:
                         "요청의 아직 수행하지 않은 다음 부분으로 넘어가세요."
                     )})
                 else:
-                    messages.append(self._observe(action, dispatch_res,
-                                                 step_history=step_history))
+                    obs = self._observe(action, dispatch_res,
+                                        step_history=step_history)
+                    if (isinstance(obs.get("content"), str)
+                            and _ELEMENTS_MARKER in obs["content"]):
+                        _mark_stale_elements(messages, last_elements_idx)
+                        last_elements_idx = len(messages)
+                    messages.append(obs)
                 prev_action_key = cur_key
 
         elapsed_ms = int((time.monotonic() - start) * 1000)

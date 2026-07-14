@@ -1403,6 +1403,113 @@ def test_read_screen_observation_is_text_only(mocker):
     mock_llm.build_observation.assert_not_called()
 
 
+def test_stale_element_listing_pruned_when_new_listing_arrives(mocker):
+    """Only the latest element listing may stay in the message log: older
+    listings hold ids that are unclickable by design, and every kept listing
+    (up to ~150 lines) is re-sent to the LLM on each remaining iteration —
+    prompt bloat that overflows small local-model context windows."""
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    listing1 = '현재 앱: TestApp\n[1] 버튼 "확인"\n[2] 링크 "취소"'
+    listing2 = '현재 앱: TestApp\n[1] 버튼 "다음"'
+    mock_llm.complete.side_effect = [
+        '{"action":"read_screen","params":{},"done":false,"response":"확인 중"}',
+        '{"action":"click_element","params":{"id":1},"done":false,"response":"클릭"}',
+        '{"action":"speak_only","params":{},"done":true,"response":"완료"}',
+    ]
+    agent = _mk_agent(mock_llm)
+
+    def _dispatch(action, params):
+        return listing1 if action == "read_screen" else "clicked element 1 at 5,5"
+
+    mocker.patch("agent.core.tools.dispatch", side_effect=_dispatch)
+    mocker.patch("agent.core.run_applescript", return_value="TestApp")
+    mocker.patch("agent.core.snapshot_screen", return_value=listing2)
+    mocker.patch("agent.core.time.sleep")
+    mocker.patch("agent.core.speak")
+
+    agent.run("확인 눌러줘")
+
+    messages = mock_llm.complete.call_args_list[2][0][0]
+    obs_msgs = [m for m in messages
+                if m["role"] == "user" and "관찰" in str(m.get("content", ""))]
+    assert len(obs_msgs) >= 2
+    # The superseded listing is cut down to an invalidation note...
+    assert '버튼 "확인"' not in obs_msgs[0]["content"]
+    assert "무효화" in obs_msgs[0]["content"]
+    # ...while the latest observation carries the fresh listing.
+    assert '버튼 "다음"' in obs_msgs[-1]["content"]
+
+
+def test_step_summary_never_repeats_full_element_listings(mocker):
+    """The step-history block rides along in every observation, so a
+    read_screen entry there must be a one-line brief — repeating the full
+    listing would grow the prompt quadratically over the run."""
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    listing = '현재 앱: TestApp\n[1] 버튼 "확인"\n[2] 링크 "취소"'
+    mock_llm.complete.side_effect = [
+        '{"action":"read_screen","params":{},"done":false,"response":"확인 중"}',
+        '{"action":"click_element","params":{"id":1},"done":false,"response":"클릭"}',
+        '{"action":"speak_only","params":{},"done":true,"response":"완료"}',
+    ]
+    agent = _mk_agent(mock_llm)
+
+    def _dispatch(action, params):
+        return listing if action == "read_screen" else "clicked element 1 at 5,5"
+
+    mocker.patch("agent.core.tools.dispatch", side_effect=_dispatch)
+    mocker.patch("agent.core.run_applescript", return_value="TestApp")
+    mocker.patch("agent.core.snapshot_screen", return_value='[1] 버튼 "다음"')
+    mocker.patch("agent.core.time.sleep")
+    mocker.patch("agent.core.speak")
+
+    agent.run("확인 눌러줘")
+
+    messages = mock_llm.complete.call_args_list[2][0][0]
+    obs_msgs = [m for m in messages
+                if m["role"] == "user" and "지금까지 수행한 단계" in str(m.get("content", ""))]
+    assert obs_msgs, "no step-history observation found"
+    history = obs_msgs[-1]["content"].split("지금까지 수행한 단계", 1)[1]
+    # The read_screen step appears as a brief, not as its full listing.
+    assert '링크 "취소"' not in history.split("현재 화면 요소:", 1)[0]
+    assert "(외" in history
+
+
+def test_run_releases_ax_flags_when_command_ends(mocker):
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.return_value = (
+        '{"action":"speak_only","params":{},"done":true,"response":"완료"}'
+    )
+    agent = _mk_agent(mock_llm)
+    mocker.patch("agent.core.speak")
+    release = mocker.patch("agent.core.release_ax_flags")
+
+    agent.run("안녕")
+
+    release.assert_called_once()
+
+
+def test_run_releases_ax_flags_even_when_dispatch_raises(mocker):
+    """Assistive-tech mode left ON keeps Chromium apps rebuilding their full
+    AX tree (system-wide lag), so the release must survive a crash mid-run."""
+    mock_llm = MagicMock()
+    mock_llm.supports_vision = False
+    mock_llm.complete.return_value = (
+        '{"action":"read_screen","params":{},"done":false,"response":"확인"}'
+    )
+    agent = _mk_agent(mock_llm)
+    mocker.patch("agent.core.tools.dispatch", side_effect=RuntimeError("boom"))
+    mocker.patch("agent.core.speak")
+    release = mocker.patch("agent.core.release_ax_flags")
+
+    with pytest.raises(RuntimeError):
+        agent.run("화면 읽어줘")
+
+    release.assert_called_once()
+
+
 def test_click_element_is_never_hot_cached(mocker):
     mock_llm = MagicMock()
     mock_llm.supports_vision = False

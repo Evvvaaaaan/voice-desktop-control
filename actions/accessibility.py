@@ -60,6 +60,12 @@ _CHROMIUM_SETTLE_SEC = 0.3
 # snapshot, so stale ids from an older screen can never be clicked.
 _SNAPSHOT: dict[int, object] = {}
 
+# pid -> app AXUIElement whose assistive-tech flags we turned ON. Chromium/
+# Electron apps keep building and updating their FULL web-content AX tree
+# (renderer CPU + memory, felt as system-wide jank) for as long as the flag
+# stays set, so every flag we set must be cleared once the command is over.
+_AX_FLAGGED: dict[int, object] = {}
+
 
 def _ax_trusted() -> bool:
     import ApplicationServices as AS
@@ -83,8 +89,30 @@ def _ax_app(pid: int):
     # assistive tech announces itself; both spellings span app generations.
     for flag in ("AXEnhancedUserInterface", "AXManualAccessibility"):
         AS.AXUIElementSetAttributeValue(app, flag, True)
+    _AX_FLAGGED[pid] = app
     time.sleep(_CHROMIUM_SETTLE_SEC)
     return app
+
+
+def release_ax_flags() -> None:
+    """Switch assistive-tech mode back OFF on every app we enabled it for.
+
+    Must run only AFTER a command is fully done: element refs held in
+    _SNAPSHOT rely on the flag staying on for center re-reads mid-command."""
+    if not _AX_FLAGGED:
+        return
+    try:
+        import ApplicationServices as AS
+    except Exception:
+        _AX_FLAGGED.clear()
+        return
+    for app in _AX_FLAGGED.values():
+        for flag in ("AXEnhancedUserInterface", "AXManualAccessibility"):
+            try:
+                AS.AXUIElementSetAttributeValue(app, flag, False)
+            except Exception:
+                pass
+    _AX_FLAGGED.clear()
 
 
 def _ax_attr(elem, name):

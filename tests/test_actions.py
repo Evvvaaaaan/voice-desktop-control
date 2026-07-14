@@ -588,3 +588,57 @@ def test_activate_target_app_false_when_target_gone(monkeypatch):
     monkeypatch.setattr(ax, "_frontmost_app", lambda: ("OtherApp", 999))
     monkeypatch.setattr(ax, "_activate_pid", lambda pid: False)
     assert ax.activate_target_app() is False
+
+
+def test_ax_app_registers_app_for_flag_release(monkeypatch):
+    import sys
+    import types
+    from actions import accessibility as ax
+
+    set_calls = []
+    fake_as = types.SimpleNamespace(
+        AXUIElementCreateApplication=lambda pid: f"app-{pid}",
+        AXUIElementSetMessagingTimeout=lambda app, timeout: None,
+        AXUIElementSetAttributeValue=(
+            lambda app, flag, value: set_calls.append((app, flag, value)) or 0
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "ApplicationServices", fake_as)
+    monkeypatch.setattr(ax.time, "sleep", lambda s: None)
+    ax._AX_FLAGGED.clear()
+
+    ax._ax_app(55)
+
+    assert ("app-55", "AXEnhancedUserInterface", True) in set_calls
+    assert ax._AX_FLAGGED == {55: "app-55"}
+
+
+def test_release_ax_flags_turns_assistive_mode_back_off(monkeypatch):
+    """Chromium/Electron apps keep rebuilding their full web AX tree (renderer
+    CPU + memory, system-wide lag) for as long as AXEnhancedUserInterface stays
+    on — releasing must set both flags to False and forget the app."""
+    import sys
+    import types
+    from actions import accessibility as ax
+
+    set_calls = []
+    fake_as = types.SimpleNamespace(
+        AXUIElementSetAttributeValue=(
+            lambda app, flag, value: set_calls.append((app, flag, value)) or 0
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "ApplicationServices", fake_as)
+    ax._AX_FLAGGED.clear()
+    ax._AX_FLAGGED[123] = "fake-app"
+
+    ax.release_ax_flags()
+
+    assert ("fake-app", "AXEnhancedUserInterface", False) in set_calls
+    assert ("fake-app", "AXManualAccessibility", False) in set_calls
+    assert ax._AX_FLAGGED == {}
+
+
+def test_release_ax_flags_noop_when_nothing_flagged():
+    from actions import accessibility as ax
+    ax._AX_FLAGGED.clear()
+    ax.release_ax_flags()   # must not raise or import anything
