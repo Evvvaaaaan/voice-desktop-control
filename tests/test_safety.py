@@ -95,15 +95,16 @@ def test_benign_korean_params_not_dangerous():
     assert guard.is_dangerous("launch_app", {"app": "Safari"}) is False
 
 
-def test_run_claude_prompt_prose_is_not_scanned_for_keywords():
-    """run_claude's `prompt` is a natural-language instruction, not an
+@pytest.mark.parametrize("action", ["run_codex", "run_claude"])
+def test_code_agent_prompt_prose_is_not_scanned_for_keywords(action):
+    """Code-agent `prompt` is a natural-language instruction, not an
     effector. Prose like '가격, 구매 문의 섹션' must not trip the money
     keyword and deny the whole build."""
     guard = SafetyGuard()
     prompt = ("로션을 판매하는 정적 웹사이트를 만들어줘. 가격, 구매 문의 "
               "섹션을 담고 반응형으로 완성해줘.")
     assert guard.is_dangerous(
-        "run_claude", {"name": "site", "base": "desktop", "prompt": prompt}
+        action, {"name": "site", "base": "desktop", "prompt": prompt}
     ) is False
 
 

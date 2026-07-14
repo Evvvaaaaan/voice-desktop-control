@@ -3,6 +3,7 @@ import os
 import pwd
 import sys
 import shlex
+import glob
 import shutil
 import subprocess
 from urllib.parse import urlsplit, urlunsplit, quote, parse_qsl, urlencode
@@ -47,6 +48,67 @@ def _project_path(name: str, base_key: str) -> str:
     sub = _PROJECT_BASES[base_key]
     base_dir = os.path.join(_user_home(), sub) if sub else _user_home()
     return os.path.join(base_dir, name)
+
+
+def _find_cli_bin(name: str) -> str | None:
+    """Find a CLI even when a GUI-launched app inherited a thin PATH."""
+    found = shutil.which(name)
+    if found and os.path.exists(found):
+        return found
+    home = _user_home()
+    candidates = [os.path.join(home, ".local", "bin", name)]
+    candidates.extend(glob.glob(os.path.join(
+        home, ".nvm", "versions", "node", "*", "bin", name
+    )))
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _validate_project_params(params: dict, action: str):
+    prompt = str(params.get("prompt", "") or "").strip()
+    if not prompt:
+        return None, None, None, f"error: {action} requires param prompt"
+    name = str(params.get("name", "") or "").strip()
+    if not name or name in (".", "..") or not _SAFE_PROJECT_NAME.match(name):
+        return None, None, None, f"error: invalid project name: {name}"
+    base_key = str(params.get("base", "desktop") or "desktop").strip().lower()
+    if base_key not in _PROJECT_BASES:
+        return None, None, None, (
+            f"error: invalid base: {base_key} — "
+            "use desktop/documents/downloads/home"
+        )
+    path = _project_path(name, base_key)
+    if not os.path.isdir(path):
+        return None, None, None, (
+            f"error: 프로젝트 폴더가 없어요 ({path}) — "
+            "먼저 new_project로 폴더를 만드세요"
+        )
+    return prompt, name, path, None
+
+
+def _start_vscode_terminal(launcher: str, label: str, path: str) -> str:
+    # Static ASCII AppleScript — no user input is interpolated here. New
+    # integrated terminal via the default SHORTCUT (Control+Shift+`, key
+    # code 50 — locale-independent, unlike the menu whose title is
+    # localized to "터미널"), then run the launcher. `key code 36` is Return.
+    applescript = (
+        'tell application "Visual Studio Code" to activate\n'
+        'delay 1.0\n'
+        'tell application "System Events"\n'
+        '    key code 50 using {control down, shift down}\n'
+        '    delay 1.0\n'
+        f'    keystroke "sh ~/{os.path.basename(launcher)}"\n'
+        '    key code 36\n'
+        'end tell'
+    )
+    result = run_applescript(applescript)
+    if isinstance(result, str) and result.startswith("error:"):
+        return (f"error: VS Code 통합 터미널에서 {label}를 실행하지 못했어요 "
+                f"(손쉬운 사용 권한을 확인하세요): {result[6:].strip()}")
+    return (f"started {label} in VS Code integrated terminal for {path} — "
+            "VS Code 터미널에서 작업이 진행되는 걸 확인하세요")
 # Only http(s) URLs, and no characters that could break out of the quoted
 # AppleScript string ("  '  \  <  >  and whitespace).
 _SAFE_URL = re.compile(r'^https?://[^\s"\'\\<>]+$')
@@ -209,23 +271,11 @@ def dispatch(action: str, params: dict) -> str:
         # editor window. new_project opened the folder as a workspace, so a new
         # integrated terminal starts in that folder. We drive VS Code via
         # System Events: focus it, open a new terminal, and run a launcher.
-        prompt = str(params.get("prompt", "") or "").strip()
-        if not prompt:
-            return "error: run_claude requires param prompt"
-        name = str(params.get("name", "") or "").strip()
-        if not name or name in (".", "..") or not _SAFE_PROJECT_NAME.match(name):
-            return f"error: invalid project name: {name}"
-        base_key = str(params.get("base", "desktop") or "desktop").strip().lower()
-        if base_key not in _PROJECT_BASES:
-            return (f"error: invalid base: {base_key} — "
-                    "use desktop/documents/downloads/home")
-        path = _project_path(name, base_key)
-        if not os.path.isdir(path):
-            return (f"error: 프로젝트 폴더가 없어요 ({path}) — "
-                    "먼저 new_project로 폴더를 만드세요")
-        claude_bin = shutil.which("claude") or os.path.join(
-            _user_home(), ".local", "bin", "claude")
-        if not os.path.exists(claude_bin):
+        prompt, _, path, err = _validate_project_params(params, "run_claude")
+        if err:
+            return err
+        claude_bin = _find_cli_bin("claude")
+        if not claude_bin:
             return ("error: claude CLI를 찾을 수 없어요 — "
                     "Claude Code가 설치되어 있는지 확인하세요")
         # Run Claude in NON-INTERACTIVE print mode (`claude -p`): it executes
@@ -251,26 +301,33 @@ def dispatch(action: str, params: dict) -> str:
             os.chmod(launcher, 0o755)
         except OSError as e:
             return f"error: 실행 스크립트를 만들지 못했어요: {e}"
-        # Static ASCII AppleScript — no user input is interpolated here. New
-        # integrated terminal via the default SHORTCUT (Control+Shift+`, key
-        # code 50 — locale-independent, unlike the menu whose title is
-        # localized to "터미널"), then run the launcher. `key code 36` is Return.
-        applescript = (
-            'tell application "Visual Studio Code" to activate\n'
-            'delay 1.0\n'
-            'tell application "System Events"\n'
-            '    key code 50 using {control down, shift down}\n'
-            '    delay 1.0\n'
-            '    keystroke "sh ~/.voicedesk_run_claude.sh"\n'
-            '    key code 36\n'
-            'end tell'
+        return _start_vscode_terminal(launcher, "Claude", path)
+    elif action == "run_codex":
+        # Run Codex CLI in VS Code's integrated terminal for voice dev
+        # workflows. `codex exec` is non-interactive, streams progress in the
+        # visible terminal, and writes inside the project workspace.
+        prompt, _, path, err = _validate_project_params(params, "run_codex")
+        if err:
+            return err
+        codex_bin = _find_cli_bin("codex")
+        if not codex_bin:
+            return ("error: codex CLI를 찾을 수 없어요 — "
+                    "Codex CLI가 설치되어 있는지 확인하세요")
+        launcher = os.path.join(_user_home(), ".voicedesk_run_codex.sh")
+        script_body = (
+            "#!/bin/sh\n"
+            f"cd {shlex.quote(path)} || exit 1\n"
+            f"exec {shlex.quote(codex_bin)} exec "
+            "--skip-git-repo-check --sandbox workspace-write "
+            f"{shlex.quote(prompt)}\n"
         )
-        result = run_applescript(applescript)
-        if isinstance(result, str) and result.startswith("error:"):
-            return ("error: VS Code 통합 터미널에서 Claude를 실행하지 못했어요 "
-                    f"(손쉬운 사용 권한을 확인하세요): {result[6:].strip()}")
-        return (f"started Claude in VS Code integrated terminal for {path} — "
-                "VS Code 터미널에서 작업이 진행되는 걸 확인하세요")
+        try:
+            with open(launcher, "w") as fh:
+                fh.write(script_body)
+            os.chmod(launcher, 0o755)
+        except OSError as e:
+            return f"error: 실행 스크립트를 만들지 못했어요: {e}"
+        return _start_vscode_terminal(launcher, "Codex", path)
     elif action == "click":
         pt = _to_logical(params)
         if pt is None:
