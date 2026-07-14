@@ -1,3 +1,4 @@
+import shlex
 import pytest
 from unittest.mock import MagicMock, patch
 from agent.cache import HotCommandCache
@@ -231,69 +232,75 @@ def _fake_claude_bin(tmp_path, mocker):
     return stub
 
 
-def test_run_claude_creates_files_and_reports(mocker, tmp_path):
-    """Success is only reported when Claude actually produced files — the
-    verification the blind type_text/press_key path could not do."""
-    from types import SimpleNamespace
-    from pathlib import Path
+def test_run_claude_runs_in_vscode_integrated_terminal(mocker, tmp_path):
+    """Claude runs in VS Code's integrated terminal: focus VS Code, open a new
+    terminal via the locale-independent shortcut, and run a launcher that calls
+    `claude -p` in print mode. The Korean prompt + project path live in the
+    fixed-ASCII launcher (safely quoted), never typed as Unicode keystrokes."""
     proj = tmp_path / "Desktop" / "lotion-site"
     proj.mkdir(parents=True)
     mocker.patch("agent.tools._user_home", return_value=str(tmp_path))
-    _fake_claude_bin(tmp_path, mocker)
-
-    def fake_run(cmd, cwd=None, **kw):
-        (Path(cwd) / "index.html").write_text("<html>")  # claude writes a file
-        return SimpleNamespace(returncode=0, stdout="done", stderr="")
-
-    mocker.patch("agent.tools.subprocess.run", side_effect=fake_run)
+    stub = _fake_claude_bin(tmp_path, mocker)
+    mock_as = mocker.patch("agent.tools.run_applescript", return_value="")
     result = dispatch("run_claude",
                       {"name": "lotion-site", "base": "desktop", "prompt": "만들어줘"})
-    assert result.startswith("created files")
-    assert "index.html" in result
+    assert result.startswith("started Claude in VS Code integrated terminal")
+    script = mock_as.call_args[0][0]
+    assert 'tell application "Visual Studio Code" to activate' in script
+    # New Terminal via shortcut (Ctrl+Shift+`), not a localized menu click.
+    assert "key code 50 using {control down, shift down}" in script
+    assert "sh ~/.voicedesk_run_claude.sh" in script
+    # Korean prompt + path live in the launcher, safely quoted — print mode.
+    launcher = (tmp_path / ".voicedesk_run_claude.sh").read_text()
+    assert "만들어줘" in launcher
+    assert str(proj) in launcher
+    assert str(stub) in launcher and " -p " in launcher
+    assert (tmp_path / ".voicedesk_run_claude.sh").stat().st_mode & 0o111
 
 
-def test_run_claude_reports_error_when_no_files_created(mocker, tmp_path):
-    """Claude exits 0 but writes nothing → this must be an error, not success,
-    so the agent's done=true gate rejects it and reports honestly."""
-    from types import SimpleNamespace
-    proj = tmp_path / "Desktop" / "site"
-    proj.mkdir(parents=True)
-    mocker.patch("agent.tools._user_home", return_value=str(tmp_path))
-    _fake_claude_bin(tmp_path, mocker)
-    mocker.patch("agent.tools.subprocess.run",
-                 return_value=SimpleNamespace(returncode=0, stdout="", stderr=""))
-    result = dispatch("run_claude",
-                      {"name": "site", "base": "desktop", "prompt": "만들어줘"})
-    assert result.startswith("error")
-
-
-def test_run_claude_reports_error_on_nonzero_exit(mocker, tmp_path):
-    from types import SimpleNamespace
+def test_run_claude_prompt_with_quotes_is_safely_quoted_in_launcher(mocker, tmp_path):
+    """A prompt with quotes/backslashes must stay one shell arg — shlex.quote
+    handles it, so the pasted-into-terminal path can never mis-quote it."""
     (tmp_path / "Desktop" / "site").mkdir(parents=True)
     mocker.patch("agent.tools._user_home", return_value=str(tmp_path))
     _fake_claude_bin(tmp_path, mocker)
-    mocker.patch("agent.tools.subprocess.run",
-                 return_value=SimpleNamespace(returncode=1, stdout="", stderr="boom"))
+    mocker.patch("agent.tools.run_applescript", return_value="")
+    tricky = 'make a "cool" 사이트 with \\ backslash'
     result = dispatch("run_claude",
-                      {"name": "site", "base": "desktop", "prompt": "x"})
-    assert result.startswith("error") and "boom" in result
+                      {"name": "site", "base": "desktop", "prompt": tricky})
+    assert result.startswith("started Claude")
+    launcher = (tmp_path / ".voicedesk_run_claude.sh").read_text()
+    # The exact prompt round-trips as the arg after `-p`.
+    toks = shlex.split(launcher.splitlines()[-1])
+    assert toks[toks.index("-p") + 1] == tricky
+
+
+def test_run_claude_reports_error_when_terminal_launch_fails(mocker, tmp_path):
+    (tmp_path / "Desktop" / "site").mkdir(parents=True)
+    mocker.patch("agent.tools._user_home", return_value=str(tmp_path))
+    _fake_claude_bin(tmp_path, mocker)
+    mocker.patch("agent.tools.run_applescript",
+                 return_value="error: -1743 not allowed")
+    result = dispatch("run_claude",
+                      {"name": "site", "base": "desktop", "prompt": "만들어줘"})
+    assert result.startswith("error") and "터미널" in result
 
 
 def test_run_claude_requires_existing_project_folder(mocker, tmp_path):
     mocker.patch("agent.tools._user_home", return_value=str(tmp_path))
     _fake_claude_bin(tmp_path, mocker)
-    mock_run = mocker.patch("agent.tools.subprocess.run")
+    mock_as = mocker.patch("agent.tools.run_applescript")
     result = dispatch("run_claude",
                       {"name": "missing", "base": "desktop", "prompt": "x"})
     assert result.startswith("error") and "폴더가 없어요" in result
-    mock_run.assert_not_called()  # never launch claude without a target folder
+    mock_as.assert_not_called()  # never launch claude without a target folder
 
 
 def test_run_claude_requires_prompt(mocker, tmp_path):
-    mock_run = mocker.patch("agent.tools.subprocess.run")
+    mock_as = mocker.patch("agent.tools.run_applescript")
     result = dispatch("run_claude", {"name": "site", "base": "desktop"})
     assert result.startswith("error: run_claude requires param prompt")
-    mock_run.assert_not_called()
+    mock_as.assert_not_called()
 
 
 def test_dispatch_open_url_rejects_non_http():

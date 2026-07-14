@@ -2,6 +2,7 @@ import re
 import os
 import pwd
 import sys
+import shlex
 import shutil
 import subprocess
 from urllib.parse import urlsplit, urlunsplit, quote, parse_qsl, urlencode
@@ -203,12 +204,11 @@ def dispatch(action: str, params: dict) -> str:
                     f"({path}): {e}")
         return f"created and opened {path} in {editor}"
     elif action == "run_claude":
-        # Run Claude Code headlessly (`claude -p`) in a project folder instead
-        # of typing a prompt into an interactive terminal blind. This is
-        # deterministic: it produces files and exits, and we VERIFY the real
-        # outcome (exit code + newly created files) so a failure can't be
-        # reported as success — the honest-completion gate the blind
-        # type_text/press_key path could not provide.
+        # Run Claude Code (`claude -p`) inside VS Code's INTEGRATED TERMINAL of
+        # the already-open project, so the user watches it work in the same
+        # editor window. new_project opened the folder as a workspace, so a new
+        # integrated terminal starts in that folder. We drive VS Code via
+        # System Events: focus it, open a new terminal, and run a launcher.
         prompt = str(params.get("prompt", "") or "").strip()
         if not prompt:
             return "error: run_claude requires param prompt"
@@ -228,25 +228,49 @@ def dispatch(action: str, params: dict) -> str:
         if not os.path.exists(claude_bin):
             return ("error: claude CLI를 찾을 수 없어요 — "
                     "Claude Code가 설치되어 있는지 확인하세요")
-        before = set(os.listdir(path))
+        # Run Claude in NON-INTERACTIVE print mode (`claude -p`): it executes
+        # the prompt and streams progress in the terminal, then exits — no TUI
+        # to navigate. Interactive `claude` instead lands on a one-time "Bypass
+        # Permissions? [No/Yes]" screen that a blind paste+Enter can't answer
+        # (it defaulted to "No, exit" and quit). Put the Korean prompt and the
+        # (possibly non-ASCII) project path in a FIXED-ASCII launcher script so
+        # the only thing typed into the terminal is `sh ~/...` — no unreliable
+        # Unicode keystrokes, no quote-escaping across paste, no dependence on
+        # the terminal's starting directory. shlex.quote keeps prompt + path
+        # safe as single argv tokens.
+        launcher = os.path.join(_user_home(), ".voicedesk_run_claude.sh")
+        script_body = (
+            "#!/bin/sh\n"
+            f"cd {shlex.quote(path)} || exit 1\n"
+            f"exec {shlex.quote(claude_bin)} -p {shlex.quote(prompt)} "
+            "--permission-mode bypassPermissions\n"
+        )
         try:
-            proc = subprocess.run(
-                [claude_bin, "-p", prompt,
-                 "--permission-mode", "bypassPermissions"],
-                cwd=path, capture_output=True, text=True, timeout=600,
-            )
-        except subprocess.TimeoutExpired:
-            return "error: Claude 실행이 10분을 넘겨 중단했어요"
-        except Exception as e:
-            return f"error: Claude 실행 실패: {e}"
-        new_files = sorted(set(os.listdir(path)) - before)
-        if proc.returncode != 0:
-            tail = (proc.stderr or proc.stdout or "").strip()[-300:]
-            return f"error: Claude 실행이 실패했어요 (code {proc.returncode}): {tail}"
-        if not new_files:
-            return ("error: Claude가 실행됐지만 새 파일이 생기지 않았어요 — "
-                    "요청을 더 구체적으로 다시 시도하세요")
-        return f"created files [{', '.join(new_files)}] in {path}"
+            with open(launcher, "w") as fh:
+                fh.write(script_body)
+            os.chmod(launcher, 0o755)
+        except OSError as e:
+            return f"error: 실행 스크립트를 만들지 못했어요: {e}"
+        # Static ASCII AppleScript — no user input is interpolated here. New
+        # integrated terminal via the default SHORTCUT (Control+Shift+`, key
+        # code 50 — locale-independent, unlike the menu whose title is
+        # localized to "터미널"), then run the launcher. `key code 36` is Return.
+        applescript = (
+            'tell application "Visual Studio Code" to activate\n'
+            'delay 1.0\n'
+            'tell application "System Events"\n'
+            '    key code 50 using {control down, shift down}\n'
+            '    delay 1.0\n'
+            '    keystroke "sh ~/.voicedesk_run_claude.sh"\n'
+            '    key code 36\n'
+            'end tell'
+        )
+        result = run_applescript(applescript)
+        if isinstance(result, str) and result.startswith("error:"):
+            return ("error: VS Code 통합 터미널에서 Claude를 실행하지 못했어요 "
+                    f"(손쉬운 사용 권한을 확인하세요): {result[6:].strip()}")
+        return (f"started Claude in VS Code integrated terminal for {path} — "
+                "VS Code 터미널에서 작업이 진행되는 걸 확인하세요")
     elif action == "click":
         pt = _to_logical(params)
         if pt is None:
